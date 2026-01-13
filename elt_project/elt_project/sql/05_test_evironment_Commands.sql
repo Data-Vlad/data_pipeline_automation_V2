@@ -90,3 +90,15 @@ Select * from test.dbo.stg_dynamic_sap
 Select * from test.dbo.tbl_SFDB_DYNMC_SAP
 Delete from test.dbo.stg_dynamic_sap
 Delete from test.dbo.tbl_SFDB_DYNMC_SAP
+
+
+
+
+
+----- removes from github  tree
+
+# 1. Delete the corrupted .git folder
+Remove-Item -Recurse -Force .git
+
+# 2. Initialize a fresh repository
+git init
