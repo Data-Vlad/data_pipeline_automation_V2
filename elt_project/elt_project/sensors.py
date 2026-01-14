@@ -2,6 +2,7 @@
 import os
 import fnmatch
 from datetime import datetime
+import re
 
 from dagster import (
     sensor,
@@ -13,6 +14,12 @@ from typing import List
 
 from .assets.models import PipelineConfig
 
+def sanitize_name(name: str) -> str:
+    """
+    Sanitizes a string to be a valid Dagster name by replacing
+    all non-alphanumeric characters with underscores.
+    """
+    return re.sub(r'[^A-Za-z0-9_]', '_', name)
 
 def generate_file_sensors(configs: List[PipelineConfig], jobs_by_import_name: dict) -> list:
     """
@@ -46,8 +53,10 @@ def create_file_sensor(config: PipelineConfig, job_name: str):
     Returns:
         A Dagster sensor definition.
     """
+    # Ensure the sensor name is valid and unique per import
+    sensor_name = sanitize_name(f"sensor_{config.import_name}")
 
-    @sensor(name=f"sensor_{config.import_name}", job_name=job_name, minimum_interval_seconds=30)
+    @sensor(name=sensor_name, job_name=job_name, minimum_interval_seconds=30)
     def _file_sensor(context: SensorEvaluationContext):
         """
         The actual sensor function that Dagster executes.

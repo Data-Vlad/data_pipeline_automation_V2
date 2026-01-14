@@ -203,9 +203,13 @@ def create_extract_and_load_asset(config: PipelineConfig):
     # We now use a sanitized, valid name.
     asset_name = sanitize_name(f"{config.import_name}_extract_and_load_staging")
 
+    # --- NEW: Support for explicit dependencies via scraper_config ---
+    deps = []
+
     @asset(
         name=asset_name, # Use the sanitized name
         group_name=config.pipeline_name.strip().lower(), # Ensure no leading/trailing whitespace before lowercasing
+        deps=deps,
         compute_kind="python",
         description=f"""
 **Extracts, validates, and stages data for the '{config.import_name}' import.**
@@ -594,7 +598,49 @@ This asset moves data from staging to the final, production-ready table.
         # or the default resource.
         engine = db_resource.get_engine()
 
+        # --- FETCH LATEST CONFIG ---
+        # The config object captured in the closure might be stale (e.g. if load_method changed from replace to append)
+        # We fetch the current load_method from the DB to ensure we respect the latest state.
+        current_load_method = config.load_method
+        current_is_active = config.is_active
+        try:
+            with engine.connect() as connection:
+                result = connection.execute(
+                    text("SELECT load_method, is_active FROM elt_pipeline_configs WHERE import_name = :import_name"),
+                    {"import_name": import_name}
+                ).mappings().one_or_none()
+                if result:
+                    current_load_method = result['load_method']
+                    current_is_active = bool(result['is_active'])
+                    context.log.info(f"Fetched runtime config for '{import_name}': load_method='{current_load_method}', is_active={current_is_active}")
+        except Exception as e:
+            context.log.warning(f"Failed to fetch runtime config for '{import_name}', using cached config. Error: {e}")
+
         start_time = datetime.utcnow()
+
+        # --- SAFETY CHECK: Handle Queued Runs during Auto-Switch ---
+        # If this pipeline is now inactive, it might be because a previous run in this batch
+        # successfully completed and triggered the auto-switch to 'append'.
+        # If we simply skip, we lose the data for this queued run.
+        # Instead, if an auto-switch target is defined, we override the mode to 'append' and proceed.
+        if not current_is_active:
+            if config.on_success_deactivate_self_and_activate_import:
+                context.log.info(f"Pipeline '{import_name}' is INACTIVE but has an auto-switch target. Treating this queued run as 'APPEND' to preserve data.")
+                current_load_method = 'append'
+                # We do NOT return; we proceed with the transform using 'append' logic.
+            else:
+                context.log.warning(f"Pipeline '{import_name}' is INACTIVE in the database. Skipping transform.")
+                log_details = {
+                    "run_id": context.run_id, "pipeline_name": pipeline_name,
+                    "import_name": import_name, "asset_name": context.asset_key.to_user_string(),
+                    "start_time": start_time, "end_time": datetime.utcnow(), 
+                    "status": "SKIPPED", "rows_processed": 0, 
+                    "message": "Skipped because pipeline is inactive.",
+                    "error_details": None, "resolution_steps": None
+                }
+                _log_asset_run(engine, log_details)
+                return
+
         # The log entry is for this specific import's transform step
         log_details = {
             "run_id": context.run_id, "pipeline_name": pipeline_name,
@@ -607,7 +653,7 @@ This asset moves data from staging to the final, production-ready table.
             context.log.info(f"Executing transform for '{import_name}': procedure {transform_procedure}")
 
             tables_to_truncate_str = ""
-            if config.load_method.lower() == 'replace':
+            if current_load_method.lower() == 'replace':
                 tables_to_truncate_str = config.destination_table
 
             context.log.info(f"Requesting truncation for destination tables: {tables_to_truncate_str or 'None'}")
@@ -618,7 +664,7 @@ This asset moves data from staging to the final, production-ready table.
             with engine.connect() as connection: # This was also correct.
                 with connection.begin() as transaction:
                     # This logic only applies to 'append' mode with a specified deduplication key.
-                    if config.load_method.lower() == 'append' and config.deduplication_key:
+                    if current_load_method.lower() == 'append' and config.deduplication_key:
                         context.log.info(f"Performing pre-transform deduplication for '{config.import_name}' on key(s): '{config.deduplication_key}'")
                         
                         # Build the JOIN condition for the DELETE statement
@@ -677,7 +723,7 @@ This asset moves data from staging to the final, production-ready table.
 
             # --- AUTOMATION: Switch from 'replace' to 'append' mode ---
             # If this was a successful 'replace' run for a config that has the auto-switch enabled.
-            if config.load_method.lower() == 'replace' and config.on_success_deactivate_self_and_activate_import:
+            if current_load_method.lower() == 'replace' and config.on_success_deactivate_self_and_activate_import:
                 triggering_import_name, target_import_to_activate = config.import_name, config.on_success_deactivate_self_and_activate_import
                 context.log.info(f"Successfully completed 'replace' for '{triggering_import_name}'. Now attempting to deactivate it and activate '{target_import_to_activate}'.")
 
