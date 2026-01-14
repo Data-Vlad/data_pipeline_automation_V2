@@ -73,7 +73,52 @@ Delete from [Test].[dbo].tbl_RI_DailyTransactions
 
 
  --CUNYFirst_FSC  Pipeline:
-
+ --CUNYFirst_FSC Pipeline:
+ 
+ --Staging Tables:
+ Select * from [Test].[dbo].[stg_CC_BudOverview]
+ Select * from [Test].[dbo].[stg_CoA_OperatingUnit]
+ Select * from [Test].[dbo].[stg_CU_BUDGET_OVERVIEW_ALL]
+ Select * from [Test].[dbo].[stg_CC_ReconDataFull]
+ Select * from [Test].[dbo].[stg_CU_REQUESTORS]
+ Select * from [Test].[dbo].[stg_CFSE_TravelExpense]
+ Select * from [Test].[dbo].[stg_CFSE_TravelExpenseProxies]
+ Select * from [Test].[dbo].[stg_CU_FSTE_VAL_DEPT_APPROVERS]
+ Select * from [Test].[dbo].[stg_CC_Travel]
+ Select * from [Test].[dbo].[stg_CFSE_SecurityRoles]
+ --Destination Tables:
+ Select * from [Test].[dbo].[tbl_CC_BudOverview]
+ Select * from [Test].[dbo].[tbl_CoA_OperatingUnit]
+ Select * from [Test].[dbo].[tbl_CU_BUDGET_OVERVIEW_ALL]
+ Select * from [Test].[dbo].[tbl_CC_ReconDataFull]
+ Select * from [Test].[dbo].[tbl_CU_REQUESTORS]
+ Select * from [Test].[dbo].[tbl_CFSE_TravelExpense]
+ Select * from [Test].[dbo].[tbl_CFSE_TravelExpenseProxies]
+ Select * from [Test].[dbo].[tbl_CU_FSTE_VAL_DEPT_APPROVERS]
+ Select * from [Test].[dbo].[tbl_CC_Travel]
+ Select * from [Test].[dbo].[tbl_CFSE_SecurityRoles]
+ --Staging Tables:
+ Delete from [Test].[dbo].[stg_CC_BudOverview]
+ Delete from [Test].[dbo].[stg_CoA_OperatingUnit]
+ Delete from [Test].[dbo].[stg_CU_BUDGET_OVERVIEW_ALL]
+ Delete from [Test].[dbo].[stg_CC_ReconDataFull]
+ Delete from [Test].[dbo].[stg_CU_REQUESTORS]
+ Delete from [Test].[dbo].[stg_CFSE_TravelExpense]
+ Delete from [Test].[dbo].[stg_CFSE_TravelExpenseProxies]
+ Delete from [Test].[dbo].[stg_CU_FSTE_VAL_DEPT_APPROVERS]
+ Delete from [Test].[dbo].[stg_CC_Travel]
+ Delete from [Test].[dbo].[stg_CFSE_SecurityRoles]
+ --Destination Tables:
+ Delete from [Test].[dbo].[tbl_CC_BudOverview]
+ Delete from [Test].[dbo].[tbl_CoA_OperatingUnit]
+ Delete from [Test].[dbo].[tbl_CU_BUDGET_OVERVIEW_ALL]
+ Delete from[Test].[dbo].[tbl_CC_ReconDataFull]
+ Delete from [Test].[dbo].[tbl_CU_REQUESTORS]
+ Delete from [Test].[dbo].[tbl_CFSE_TravelExpense]
+ Delete from [Test].[dbo].[tbl_CFSE_TravelExpenseProxies]
+ Delete from [Test].[dbo].[tbl_CU_FSTE_VAL_DEPT_APPROVERS]
+ Delete from [Test].[dbo].[tbl_CC_Travel]
+ Delete from [Test].[dbo].[tbl_CFSE_SecurityRoles]
 
 
 
@@ -95,10 +140,3 @@ Delete from test.dbo.tbl_SFDB_DYNMC_SAP
 
 
 
------ removes from github  tree
-
-# 1. Delete the corrupted .git folder
-Remove-Item -Recurse -Force .git
-
-# 2. Initialize a fresh repository
-git init

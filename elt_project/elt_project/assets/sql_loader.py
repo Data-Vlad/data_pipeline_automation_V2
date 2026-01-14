@@ -40,6 +40,10 @@ def load_csv_to_sql_chunked(
     Truncation for 'replace' load method is now handled in the asset factory.
     Returns the total number of rows processed.
     """
+    # Get target table columns to filter the dataframe
+    inspector = inspect(engine)
+    db_cols = {col['name'].lower(): col['name'] for col in inspector.get_columns(table_name)}
+
     total_rows = 0
     with engine.connect() as connection:
         with connection.begin() as transaction:
@@ -60,6 +64,13 @@ def load_csv_to_sql_chunked(
                             chunk = chunk.rename(columns=column_mapping)
 
                         chunk['dagster_run_id'] = run_id
+
+                        # Filter and normalize columns to match DB schema
+                        # This prevents errors with extra columns in the CSV (like 'Unit Price.1')
+                        valid_chunk_cols = [c for c in chunk.columns if c.lower() in db_cols]
+                        chunk = chunk[valid_chunk_cols]
+                        rename_map = {c: db_cols[c.lower()] for c in valid_chunk_cols}
+                        chunk = chunk.rename(columns=rename_map)
 
                         # Find boolean-like columns and fill NaNs with 0 (False)
                         # This mirrors the logic in the non-chunked path in factory.py
