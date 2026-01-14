@@ -597,157 +597,164 @@ This asset moves data from staging to the final, production-ready table.
         # Since this transform runs for the whole group, we can use the connection from the first config
         # or the default resource.
         engine = db_resource.get_engine()
-
-        # --- FETCH LATEST CONFIG ---
-        # The config object captured in the closure might be stale (e.g. if load_method changed from replace to append)
-        # We fetch the current load_method from the DB to ensure we respect the latest state.
-        current_load_method = config.load_method
-        current_is_active = config.is_active
+        
+        # --- SERIALIZATION LOCK ---
+        # Acquire an exclusive application lock on the destination table.
+        # This prevents parallel runs (e.g. Replace vs Append) from overwriting each other.
+        # We use a dedicated connection for the lock that stays open for the duration of the asset.
+        lock_conn = engine.connect()
+        lock_resource = f"lock_{config.destination_table}"
         try:
-            with engine.connect() as connection:
-                result = connection.execute(
-                    text("SELECT load_method, is_active FROM elt_pipeline_configs WHERE import_name = :import_name"),
-                    {"import_name": import_name}
-                ).mappings().one_or_none()
-                if result:
-                    current_load_method = result['load_method']
-                    current_is_active = bool(result['is_active'])
-                    context.log.info(f"Fetched runtime config for '{import_name}': load_method='{current_load_method}', is_active={current_is_active}")
-        except Exception as e:
-            context.log.warning(f"Failed to fetch runtime config for '{import_name}', using cached config. Error: {e}")
+            context.log.info(f"Acquiring serialization lock for table '{config.destination_table}'...")
+            # LockTimeout = -1 means wait indefinitely until the lock is available.
+            lock_stmt = text("DECLARE @res INT; EXEC @res = sp_getapplock @Resource = :res, @LockMode = 'Exclusive', @LockOwner = 'Session', @LockTimeout = -1; SELECT @res;")
+            lock_result = lock_conn.execute(lock_stmt, {"res": lock_resource}).scalar()
+            
+            if lock_result < 0:
+                raise Exception(f"Failed to acquire serialization lock for '{lock_resource}'. Result code: {lock_result}")
+            
+            context.log.info("Lock acquired. Proceeding with transform logic.")
 
-        start_time = datetime.utcnow()
+            # --- FETCH LATEST CONFIG ---
+            # The config object captured in the closure might be stale (e.g. if load_method changed from replace to append)
+            # We fetch the current load_method from the DB to ensure we respect the latest state.
+            current_load_method = config.load_method
+            current_is_active = config.is_active
+            try:
+                with engine.connect() as connection:
+                    result = connection.execute(
+                        text("SELECT load_method, is_active FROM elt_pipeline_configs WHERE import_name = :import_name"),
+                        {"import_name": import_name}
+                    ).mappings().one_or_none()
+                    if result:
+                        current_load_method = result['load_method']
+                        current_is_active = bool(result['is_active'])
+                        context.log.info(f"Fetched runtime config for '{import_name}': load_method='{current_load_method}', is_active={current_is_active}")
+            except Exception as e:
+                context.log.warning(f"Failed to fetch runtime config for '{import_name}', using cached config. Error: {e}")
 
-        # --- SAFETY CHECK: Handle Queued Runs during Auto-Switch ---
-        # If this pipeline is now inactive, it might be because a previous run in this batch
-        # successfully completed and triggered the auto-switch to 'append'.
-        # If we simply skip, we lose the data for this queued run.
-        # Instead, if an auto-switch target is defined, we override the mode to 'append' and proceed.
-        if not current_is_active:
-            if config.on_success_deactivate_self_and_activate_import:
-                context.log.info(f"Pipeline '{import_name}' is INACTIVE but has an auto-switch target. Treating this queued run as 'APPEND' to preserve data.")
+            start_time = datetime.utcnow()
+
+            # --- SAFETY CHECK: Handle Queued Runs during Auto-Switch ---
+            # If this pipeline is now inactive, it might be because a previous run in this batch
+            # successfully completed and triggered the auto-switch to 'append'.
+            # If we simply skip, we lose the data for this queued run.
+            # Instead, we universally override the mode to 'append' to preserve data.
+            if not current_is_active:
+                context.log.info(f"Pipeline '{import_name}' is INACTIVE in the database. Treating this queued run as 'APPEND' to preserve data.")
                 current_load_method = 'append'
                 # We do NOT return; we proceed with the transform using 'append' logic.
-            else:
-                context.log.warning(f"Pipeline '{import_name}' is INACTIVE in the database. Skipping transform.")
-                log_details = {
-                    "run_id": context.run_id, "pipeline_name": pipeline_name,
-                    "import_name": import_name, "asset_name": context.asset_key.to_user_string(),
-                    "start_time": start_time, "end_time": datetime.utcnow(), 
-                    "status": "SKIPPED", "rows_processed": 0, 
-                    "message": "Skipped because pipeline is inactive.",
-                    "error_details": None, "resolution_steps": None
-                }
-                _log_asset_run(engine, log_details)
-                return
 
-        # The log entry is for this specific import's transform step
-        log_details = {
-            "run_id": context.run_id, "pipeline_name": pipeline_name,
-            "import_name": import_name, "asset_name": context.asset_key.to_user_string(),
-            "start_time": start_time, "end_time": None, "status": "FAILURE", "rows_processed": None, "message": "",
-            "error_details": None, "resolution_steps": None # Initialize to None
-        }
+            # The log entry is for this specific import's transform step
+            log_details = {
+                "run_id": context.run_id, "pipeline_name": pipeline_name,
+                "import_name": import_name, "asset_name": context.asset_key.to_user_string(),
+                "start_time": start_time, "end_time": None, "status": "FAILURE", "rows_processed": None, "message": "",
+                "error_details": None, "resolution_steps": None # Initialize to None
+            }
 
-        try:
-            context.log.info(f"Executing transform for '{import_name}': procedure {transform_procedure}")
+            try:
+                context.log.info(f"Executing transform for '{import_name}': procedure {transform_procedure}")
 
-            tables_to_truncate_str = ""
-            if current_load_method.lower() == 'replace':
-                tables_to_truncate_str = config.destination_table
+                tables_to_truncate_str = ""
+                if current_load_method.lower() == 'replace':
+                    tables_to_truncate_str = config.destination_table
 
-            context.log.info(f"Requesting truncation for destination tables: {tables_to_truncate_str or 'None'}")
+                context.log.info(f"Requesting truncation for destination tables: {tables_to_truncate_str or 'None'}")
 
-            # --- Automated Deduplication for 'append' method ---
-            # Before calling the transform, if this is an append operation with a deduplication key,
-            # we'll clean the staging table to remove rows that already exist in the destination.
-            with engine.connect() as connection: # This was also correct.
-                with connection.begin() as transaction:
-                    # This logic only applies to 'append' mode with a specified deduplication key.
-                    if current_load_method.lower() == 'append' and config.deduplication_key:
-                        context.log.info(f"Performing pre-transform deduplication for '{config.import_name}' on key(s): '{config.deduplication_key}'")
-                        
-                        # Build the JOIN condition for the DELETE statement
-                        key_columns = [key.strip() for key in config.deduplication_key.split(',')]
-                        join_conditions = " AND ".join([f"s.[{col}] = d.[{col}]" for col in key_columns])
-
-                        # This SQL statement deletes rows from the staging table (aliased as 's')
-                        # where a matching record (based on the deduplication key) already exists
-                        # in the destination table (aliased as 'd').
-                        # It only considers rows from the current run.
-                        dedupe_sql = text(f"""
-                            DELETE s
-                            FROM {config.staging_table} s
-                            JOIN {config.destination_table} d ON {join_conditions}
-                            WHERE s.dagster_run_id = :run_id
-                        """)
-                        
-                        result = connection.execute(dedupe_sql, {"run_id": context.run_id})
-                        
-                        if result.rowcount > 0:
-                            context.log.info(f"Removed {result.rowcount} duplicate rows from '{config.staging_table}' before transformation.")
-                        else:
-                            context.log.info(f"No duplicate rows found for '{config.import_name}'.")
-                    
-                    transaction.commit() # This was also correct.
-
-            # The stored procedure is now expected to handle:
-            # 1. Processing only new data identified by the run_id.
-            # 2. Conditionally truncating destination tables based on the tables_to_truncate string.
-            # This moves the truncation logic into the SQL transaction for better atomicity.
-            # The `execute_stored_procedure` function needs to be updated to accept this new parameter.
-
-            row_count = execute_stored_procedure(
-                procedure_name=transform_procedure,
-                engine=engine,
-                run_id=context.run_id,
-                tables_to_truncate=tables_to_truncate_str
-            )
-            log_details["rows_processed"] = row_count
-            context.log.info(f"Transform complete for {pipeline_name}. Rows affected: {row_count}")
-
-            # Generic cleanup: Delete processed data from all staging tables for this run.
-            # This prevents re-processing if the transform asset is re-run, ensuring idempotency.
-            with engine.connect() as connection: # This was also correct.
-                with connection.begin() as transaction:
-                    from sqlalchemy.sql import quoted_name
-                    context.log.info(f"Cleaning up staging tables for run_id: {context.run_id}")
-
-                    safe_table_name = quoted_name(config.staging_table, quote=True)
-                    delete_stmt = text(f"DELETE FROM {safe_table_name} WHERE dagster_run_id = :run_id")
-                    connection.execute(delete_stmt, {"run_id": context.run_id})
-                    context.log.info(f"Cleaned up staging table: {config.staging_table}")
-                    transaction.commit()
-
-            log_details["status"] = "SUCCESS"
-
-            # --- AUTOMATION: Switch from 'replace' to 'append' mode ---
-            # If this was a successful 'replace' run for a config that has the auto-switch enabled.
-            if current_load_method.lower() == 'replace' and config.on_success_deactivate_self_and_activate_import:
-                triggering_import_name, target_import_to_activate = config.import_name, config.on_success_deactivate_self_and_activate_import
-                context.log.info(f"Successfully completed 'replace' for '{triggering_import_name}'. Now attempting to deactivate it and activate '{target_import_to_activate}'.")
-
+                # --- Automated Deduplication for 'append' method ---
+                # Before calling the transform, if this is an append operation with a deduplication key,
+                # we'll clean the staging table to remove rows that already exist in the destination.
                 with engine.connect() as connection: # This was also correct.
                     with connection.begin() as transaction:
-                        # Deactivate self
-                        deactivate_stmt = text("UPDATE elt_pipeline_configs SET is_active = 0 WHERE import_name = :self_import")
-                        connection.execute(deactivate_stmt, {"self_import": triggering_import_name})
+                        # This logic only applies to 'append' mode with a specified deduplication key.
+                        if current_load_method.lower() == 'append' and config.deduplication_key:
+                            context.log.info(f"Performing pre-transform deduplication for '{config.import_name}' on key(s): '{config.deduplication_key}'")
+                            
+                            # Build the JOIN condition for the DELETE statement
+                            key_columns = [key.strip() for key in config.deduplication_key.split(',')]
+                            join_conditions = " AND ".join([f"s.[{col}] = d.[{col}]" for col in key_columns])
+
+                            # This SQL statement deletes rows from the staging table (aliased as 's')
+                            # where a matching record (based on the deduplication key) already exists
+                            # in the destination table (aliased as 'd').
+                            # It only considers rows from the current run.
+                            dedupe_sql = text(f"""
+                                DELETE s
+                                FROM {config.staging_table} s
+                                JOIN {config.destination_table} d ON {join_conditions}
+                                WHERE s.dagster_run_id = :run_id
+                            """)
+                            
+                            result = connection.execute(dedupe_sql, {"run_id": context.run_id})
+                            
+                            if result.rowcount > 0:
+                                context.log.info(f"Removed {result.rowcount} duplicate rows from '{config.staging_table}' before transformation.")
+                            else:
+                                context.log.info(f"No duplicate rows found for '{config.import_name}'.")
                         
-                        # Activate the target append pipeline
-                        activate_stmt = text("UPDATE elt_pipeline_configs SET is_active = 1 WHERE import_name = :target_import")
-                        connection.execute(activate_stmt, {"target_import": target_import_to_activate})
+                        transaction.commit() # This was also correct.
+
+                # The stored procedure is now expected to handle:
+                # 1. Processing only new data identified by the run_id.
+                # 2. Conditionally truncating destination tables based on the tables_to_truncate string.
+                # This moves the truncation logic into the SQL transaction for better atomicity.
+                # The `execute_stored_procedure` function needs to be updated to accept this new parameter.
+
+                row_count = execute_stored_procedure(
+                    procedure_name=transform_procedure,
+                    engine=engine,
+                    run_id=context.run_id,
+                    tables_to_truncate=tables_to_truncate_str
+                )
+                log_details["rows_processed"] = row_count
+                context.log.info(f"Transform complete for {pipeline_name}. Rows affected: {row_count}")
+
+                # Generic cleanup: Delete processed data from all staging tables for this run.
+                # This prevents re-processing if the transform asset is re-run, ensuring idempotency.
+                with engine.connect() as connection: # This was also correct.
+                    with connection.begin() as transaction:
+                        from sqlalchemy.sql import quoted_name
+                        context.log.info(f"Cleaning up staging tables for run_id: {context.run_id}")
+
+                        safe_table_name = quoted_name(config.staging_table, quote=True)
+                        delete_stmt = text(f"DELETE FROM {safe_table_name} WHERE dagster_run_id = :run_id")
+                        connection.execute(delete_stmt, {"run_id": context.run_id})
+                        context.log.info(f"Cleaned up staging table: {config.staging_table}")
                         transaction.commit()
-                context.log.info(f"Successfully updated database. '{triggering_import_name}' is now inactive, and '{target_import_to_activate}' is active. The correct sensor will run on the next tick.")
-        except Exception as e:
-            log_details["error_details"] = traceback.format_exc()
-            log_details["resolution_steps"] = f"Review Dagster logs for '{context.asset_key.to_user_string()}'. Inspect the SQL stored procedure '{transform_procedure}'."
-            log_details["message"] = str(e)
-            context.log.error(f"Error during transform for {pipeline_name}: {e}")
-            raise
+
+                log_details["status"] = "SUCCESS"
+
+                # --- AUTOMATION: Switch from 'replace' to 'append' mode ---
+                # If this was a successful 'replace' run for a config that has the auto-switch enabled.
+                if current_load_method.lower() == 'replace' and config.on_success_deactivate_self_and_activate_import:
+                    triggering_import_name, target_import_to_activate = config.import_name, config.on_success_deactivate_self_and_activate_import
+                    context.log.info(f"Successfully completed 'replace' for '{triggering_import_name}'. Now attempting to deactivate it and activate '{target_import_to_activate}'.")
+
+                    with engine.connect() as connection: # This was also correct.
+                        with connection.begin() as transaction:
+                            # Deactivate self
+                            deactivate_stmt = text("UPDATE elt_pipeline_configs SET is_active = 0 WHERE import_name = :self_import")
+                            connection.execute(deactivate_stmt, {"self_import": triggering_import_name})
+                            
+                            # Activate the target append pipeline
+                            activate_stmt = text("UPDATE elt_pipeline_configs SET is_active = 1 WHERE import_name = :target_import")
+                            connection.execute(activate_stmt, {"target_import": target_import_to_activate})
+                            transaction.commit()
+                    context.log.info(f"Successfully updated database. '{triggering_import_name}' is now inactive, and '{target_import_to_activate}' is active. The correct sensor will run on the next tick.")
+            except Exception as e:
+                log_details["error_details"] = traceback.format_exc()
+                log_details["resolution_steps"] = f"Review Dagster logs for '{context.asset_key.to_user_string()}'. Inspect the SQL stored procedure '{transform_procedure}'."
+                log_details["message"] = str(e)
+                context.log.error(f"Error during transform for {pipeline_name}: {e}")
+                raise
+            finally:
+                log_details["end_time"] = datetime.utcnow()
+                # Now that _log_asset_run is in scope, we can call it.
+                _log_asset_run(engine, log_details)
         finally:
-            log_details["end_time"] = datetime.utcnow()
-            # Now that _log_asset_run is in scope, we can call it.
-            _log_asset_run(engine, log_details)
+            # Release the serialization lock
+            lock_conn.close()
 
     return transform_asset
 
