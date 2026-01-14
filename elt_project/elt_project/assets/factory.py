@@ -3,6 +3,7 @@ import pandas as pd
 from datetime import datetime
 import re
 import os # Ensure os is imported
+import json
 from typing import Optional, List
 import traceback # Import traceback to capture detailed error info
 from sqlalchemy import create_engine
@@ -536,6 +537,18 @@ def create_transform_asset(config: PipelineConfig):
 
     # Define dependencies on the specific extract asset
     deps = [AssetKey(sanitize_name(f"{import_name}_extract_and_load_staging"))]
+
+    # --- NEW: Support for explicit dependencies via scraper_config ---
+    # This allows users to chain imports (e.g., ensure 'replace' runs before 'append')
+    if config.scraper_config:
+        try:
+            sc_config = json.loads(config.scraper_config)
+            if isinstance(sc_config, dict) and "depends_on" in sc_config:
+                upstream_import = sc_config["depends_on"]
+                # We depend on the upstream's TRANSFORM asset to ensure it is fully complete
+                deps.append(AssetKey(sanitize_name(f"{upstream_import}_transform")))
+        except Exception:
+            pass # Ignore parsing errors
 
     @asset(
         name=sanitized_transform_name, # Use the sanitized name
