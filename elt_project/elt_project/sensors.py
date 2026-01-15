@@ -3,6 +3,8 @@ import os
 import fnmatch
 from datetime import datetime
 import re
+import json
+from sqlalchemy import text
 
 from dagster import (
     sensor,
@@ -13,6 +15,7 @@ from dagster import (
 from typing import List
 
 from .assets.models import PipelineConfig
+from .assets.resources import SQLServerResource
 
 def sanitize_name(name: str) -> str:
     """
@@ -21,13 +24,14 @@ def sanitize_name(name: str) -> str:
     """
     return re.sub(r'[^A-Za-z0-9_]', '_', name)
 
-def generate_file_sensors(configs: List[PipelineConfig], jobs_by_import_name: dict) -> list:
+def generate_file_sensors(configs: List[PipelineConfig], jobs_by_import_name: dict, db_resource: SQLServerResource) -> list:
     """
     Generates a list of file sensors from a list of pipeline configurations.
 
     Args:
         configs (List[PipelineConfig]): A list of all pipeline configurations.
         jobs_by_import_name (dict): A mapping from import_name to its corresponding job name.
+        db_resource (SQLServerResource): Database resource for runtime config checks.
 
     Returns:
         list: A list of Dagster sensor definitions.
@@ -35,10 +39,10 @@ def generate_file_sensors(configs: List[PipelineConfig], jobs_by_import_name: di
     sensors = []
     for config in configs:
         if config.monitored_directory and config.import_name in jobs_by_import_name:
-            sensors.append(create_file_sensor(config, job_name=jobs_by_import_name[config.import_name]))
+            sensors.append(create_file_sensor(config, job_name=jobs_by_import_name[config.import_name], db_resource=db_resource))
     return sensors
 
-def create_file_sensor(config: PipelineConfig, job_name: str):
+def create_file_sensor(config: PipelineConfig, job_name: str, db_resource: SQLServerResource):
     """
     Factory to create a file sensor for a given pipeline configuration.
 
@@ -49,6 +53,7 @@ def create_file_sensor(config: PipelineConfig, job_name: str):
     Args:
         config (PipelineConfig): The configuration for the pipeline import.
         job_name (str): The name of the job to trigger.
+        db_resource (SQLServerResource): Database resource for runtime config checks.
 
     Returns:
         A Dagster sensor definition.
@@ -61,55 +66,95 @@ def create_file_sensor(config: PipelineConfig, job_name: str):
         """
         The actual sensor function that Dagster executes.
         """
-        # --- Start of Debugging ---
-        context.log.info(f"Sensor '{config.import_name}' ticking.")
-        context.log.info(f"-> Monitoring Directory: '{config.monitored_directory}'")
-        context.log.info(f"-> For File Pattern: '{config.file_pattern}'")
-        # --- End of Debugging ---
+        # --- Runtime Config Check ---
+        # We fetch the latest config from the DB to see if it matches what was loaded at startup.
+        current_staging_display = config.staging_table
+        current_mode_display = config.load_method.upper()
+        restart_required = False
+        db_staging_table = None
+
+        try:
+            engine = db_resource.get_engine()
+            with engine.connect() as conn:
+                row = conn.execute(
+                    text("SELECT staging_table, load_method, scraper_config FROM elt_pipeline_configs WHERE import_name = :import_name"),
+                    {"import_name": config.import_name}
+                ).mappings().one_or_none()
+                
+                if row:
+                    db_staging_table = row['staging_table']
+                    # Check for dependency override in DB config
+                    if row['scraper_config']:
+                        try:
+                            sc_config = json.loads(row['scraper_config'])
+                            if isinstance(sc_config, dict) and "depends_on" in sc_config:
+                                current_mode_display = "APPEND (Override: Dependency)"
+                        except Exception:
+                            pass
+                    
+                    # Detect mismatch
+                    if db_staging_table != config.staging_table:
+                        current_staging_display = f"{config.staging_table} (DB: {db_staging_table})"
+                        restart_required = True
+        except Exception as e:
+            print(f"  > Warning: Could not verify DB config: {e}")
+        
+        # --- Simplified Console Output ---
+        print(f"[SENSOR] Checking '{config.import_name}' (Stg: {current_staging_display} | Mode: {current_mode_display})...")
+        
+        if restart_required:
+            print(f"  > [!] CONFIG MISMATCH: Database staging table '{db_staging_table}' differs from loaded config.")
+            print(f"  > [!] ACTION REQUIRED: You must restart Dagster (close and re-run) to apply this change.")
 
         if not config.monitored_directory or not os.path.isdir(config.monitored_directory):
+            print(f"  > ERROR: Directory '{config.monitored_directory}' not found.")
+            context.log.error(f"Directory not found: {config.monitored_directory}")
             return SkipReason(f"Monitored directory not found: {config.monitored_directory}")
 
         # Get the last processed timestamp from the cursor
         last_mtime = float(context.cursor) if context.cursor else 0
         max_mtime = last_mtime
-        context.log.info(f"-> Last processed file time (from cursor): {datetime.fromtimestamp(last_mtime).isoformat() if last_mtime > 0 else 'Never run before'}")
-        
-        for filename in os.listdir(config.monitored_directory):
-            if fnmatch.fnmatch(filename, config.file_pattern):
-                filepath = os.path.join(config.monitored_directory, filename)
-                # --- Start of Debugging ---
-                context.log.info(f"  - Found matching file: '{filename}'")
-                # --- End of Debugging ---
-                try:
-                    mtime = os.path.getmtime(filepath)
-                    context.log.info(f"    - File's modification time: {datetime.fromtimestamp(mtime).isoformat()}")
+
+        try:
+            matching_files = [f for f in os.listdir(config.monitored_directory) if fnmatch.fnmatch(f, config.file_pattern)]
+        except Exception as e:
+            print(f"  > ERROR reading directory: {e}")
+            return
+
+        if not matching_files:
+            print(f"  > No files match '{config.file_pattern}'.")
+            return
+
+        new_files_count = 0
+        for filename in matching_files:
+            filepath = os.path.join(config.monitored_directory, filename)
+            try:
+                mtime = os.path.getmtime(filepath)
+                
+                if mtime > last_mtime:
+                    print(f"  > [+] NEW FILE: {filename} -> Triggering Run (Staging: {config.staging_table} -> Dest: {config.destination_table})")
+                    context.log.info(f"Triggering run for new file: {filename}")
                     
-                    # This is the core condition. A run is triggered only if the file is newer than the last one we processed.
-                    if mtime > last_mtime:
-                        context.log.info("    - !!! CONDITION MET: File is new. Triggering a run. !!!")
-                        run_key = f"{config.import_name}:{filepath}:{mtime}"
-                        
-                        # This is the run_config that the asset will receive
-                        run_config = {
-                            "ops": {
-                                f"{config.import_name}_extract_and_load_staging": {
-                                    "config": {"source_file_path": filepath}
-                                }
+                    run_key = f"{config.import_name}:{filepath}:{mtime}"
+                    
+                    run_config = {
+                        "ops": {
+                            f"{config.import_name}_extract_and_load_staging": {
+                                "config": {"source_file_path": filepath}
                             }
                         }
-                        
-                        # Yield a RunRequest for the specific job with the config.
-                        yield RunRequest(run_key=run_key, run_config=run_config, job_name=job_name)
-                        max_mtime = max(max_mtime, mtime)
+                    }
+                    
+                    yield RunRequest(run_key=run_key, run_config=run_config, job_name=job_name)
+                    max_mtime = max(max_mtime, mtime)
+                    new_files_count += 1
 
-                except FileNotFoundError:
-                    # File might have been deleted between listdir and getmtime
-                    context.log.warning(f"File {filepath} not found during sensor evaluation.")
+            except FileNotFoundError:
+                pass
 
-        # --- Start of Debugging ---
-        context.log.info(f"-> Finished checking files. New cursor value will be: {datetime.fromtimestamp(max_mtime).isoformat() if max_mtime > 0 else 'Unchanged'}")
-        # --- End of Debugging ---
+        if new_files_count == 0:
+            print(f"  > Checked {len(matching_files)} files. No new data.")
+
         if max_mtime > last_mtime:
             context.update_cursor(str(max_mtime))
 

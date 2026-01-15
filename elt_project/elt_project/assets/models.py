@@ -27,6 +27,7 @@ class PipelineConfig(BaseModel):
     scraper_config: Optional[str] = None
     deduplication_key: Optional[str] = None
     on_success_deactivate_self_and_activate_import: Optional[str] = None
+    depends_on: Optional[str] = None
 
     @field_validator('column_mapping', mode='before')
     @classmethod

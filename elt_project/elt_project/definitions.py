@@ -104,7 +104,7 @@ def load_all_definitions_from_db(db_resource: SQLServerResource) -> Tuple[list, 
         jobs_by_import_name[pipeline_config.import_name] = single_import_job.name
 
     # Step 4: Generate sensors that trigger these new, complete jobs.
-    all_sensors = generate_file_sensors(all_pipeline_configs, jobs_by_import_name)
+    all_sensors = generate_file_sensors(all_pipeline_configs, jobs_by_import_name, db_resource)
 
     # Step 5: Create jobs for entire asset groups (for manual runs in the UI).
     group_jobs = [

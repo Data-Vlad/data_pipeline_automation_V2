@@ -262,6 +262,23 @@ If it fails, check the run logs for details on data quality issues or parsing er
         engine = get_dynamic_engine(db_resource)
         source_file_path = context.op_config.get("source_file_path")
         resolved_path_for_feedback = source_file_path # Initialize for feedback logging
+        
+        # --- Runtime Config Fetch ---
+        # Fetch the latest staging table name to handle config updates without full restart
+        current_staging_table = config.staging_table
+        try:
+            with engine.connect() as connection:
+                row = connection.execute(
+                    text("SELECT staging_table FROM elt_pipeline_configs WHERE import_name = :import_name"),
+                    {"import_name": config.import_name}
+                ).mappings().one_or_none()
+                if row and row['staging_table']:
+                    current_staging_table = row['staging_table']
+                    if current_staging_table != config.staging_table:
+                        context.log.info(f"Runtime config override: Using staging table '{current_staging_table}' (Configured: '{config.staging_table}')")
+        except Exception as e:
+            context.log.warning(f"Failed to fetch runtime config for staging table: {e}. Using cached value.")
+
         start_time = datetime.utcnow()
 
         log_details = {
@@ -298,11 +315,11 @@ If it fails, check the run logs for details on data quality issues or parsing er
             try:
                 with engine.connect() as connection:
                     with connection.begin() as transaction:
-                        connection.execute(text(f"TRUNCATE TABLE {config.staging_table}"))
+                        connection.execute(text(f"TRUNCATE TABLE {current_staging_table}"))
                         transaction.commit()
-                context.log.info(f"Cleared staging table {config.staging_table} before load.")
+                context.log.info(f"Cleared staging table {current_staging_table} before load.")
             except Exception as e:
-                context.log.warning(f"Failed to clear staging table {config.staging_table} before load: {e}")
+                context.log.warning(f"Failed to clear staging table {current_staging_table} before load: {e}")
 
             # OPTIMIZATION: Use chunked loading for standard CSVs to save memory
             if config.file_type.lower() == 'csv' and not config.parser_function:
@@ -335,14 +352,14 @@ If it fails, check the run logs for details on data quality issues or parsing er
                     context.log.info(f"Using memory-efficient chunked CSV loader for {resolved_path}")
                     rows_processed = load_csv_to_sql_chunked(
                         file_path=resolved_path,
-                        table_name=config.staging_table,
+                        table_name=current_staging_table,
                         engine=engine,
                         run_id=context.run_id,
                         column_mapping=config.get_column_mapping()
                     )
                     log_details["rows_processed"] = rows_processed
                     context.log.info(f"Successfully loaded {rows_processed} rows in chunks.")
-                    context.add_output_metadata({"num_rows": rows_processed, "staging_table": config.staging_table})
+                    context.add_output_metadata({"num_rows": rows_processed, "staging_table": current_staging_table})
                 except FileNotFoundError:
                     context.log.warning(f"Source file not found for {config.import_name}: '{file_to_parse}'. Skipping.")
                     # No user feedback log here, as no file was found to be "processed". The sensor just moves on.
@@ -416,16 +433,16 @@ If it fails, check the run logs for details on data quality issues or parsing er
                 log_details["rows_processed"] = rows_processed
                 context.log.info(f"Successfully parsed {rows_processed} rows.")
                 
-                context.log.info(f"Loading data into staging table: {config.staging_table}")
-                load_df_to_sql(df, config.staging_table, engine)
+                context.log.info(f"Loading data into staging table: {current_staging_table}")
+                load_df_to_sql(df, current_staging_table, engine)
 
                 # --- DATA GOVERNANCE: Execute Data Quality Checks ---
-                context.log.info(f"Executing data quality checks for table: {config.staging_table}")
+                context.log.info(f"Executing data quality checks for table: {current_staging_table}")
                 with engine.connect() as connection: # This was already correct, no change needed here.
                     # We use a direct execution here to get the output value (total failing rows)
                     result = connection.execute(
                         text("EXEC sp_execute_data_quality_checks @run_id=:run_id, @target_table=:target_table"),
-                        {"run_id": context.run_id, "target_table": config.staging_table}
+                        {"run_id": context.run_id, "target_table": current_staging_table}
                     ).scalar_one_or_none()
                     total_failing_rows = result if result is not None else 0
                     context.log.info(f"Data quality checks completed. Total failing rows: {total_failing_rows}")
@@ -437,7 +454,7 @@ If it fails, check the run logs for details on data quality issues or parsing er
                             JOIN data_quality_rules r ON l.rule_id = r.rule_id
                             WHERE l.run_id = :run_id AND r.target_table = :target_table AND l.status = 'FAIL' AND r.severity = 'FAIL'
                         """),
-                        {"run_id": context.run_id, "target_table": config.staging_table}
+                        {"run_id": context.run_id, "target_table": current_staging_table}
                     ).scalar()
                     if fail_rules_failed_count > 0:
                         raise Exception(f"{fail_rules_failed_count} critical data quality rule(s) failed. Halting pipeline run. Check 'data_quality_run_logs' for details.")
@@ -445,12 +462,12 @@ If it fails, check the run logs for details on data quality issues or parsing er
                 context.log.info("Load to staging complete.")
                 
                 context.add_output_metadata({
-                    "num_rows": rows_processed, "staging_table": config.staging_table,
+                    "num_rows": rows_processed, "staging_table": current_staging_table,
                     "preview": df.head().to_markdown(),
                 })
 
             log_details["status"] = "SUCCESS"
-            log_details["message"] = f"Successfully processed and loaded {log_details['rows_processed']} rows into {config.staging_table}."
+            log_details["message"] = f"Successfully processed and loaded {log_details['rows_processed']} rows into {current_staging_table}."
 
         except Exception as e:
             # --- Smart Error Handling for Column Mismatches ---
@@ -460,19 +477,19 @@ If it fails, check the run logs for details on data quality issues or parsing er
                     # Introspect the database to get the actual table columns
                     from sqlalchemy import inspect
                     inspector = inspect(engine)
-                    table_columns = [col['name'] for col in inspector.get_columns(config.staging_table)]
+                    table_columns = [col['name'] for col in inspector.get_columns(current_staging_table)]
                     
                     # Craft a helpful, actionable error message
                     resolution_steps = (
-                        f"Database schema mismatch. The columns in your data do not match the columns in the staging table '{config.staging_table}'.\n"
+                        f"Database schema mismatch. The columns in your data do not match the columns in the staging table '{current_staging_table}'.\n"
                         f"  > Columns in your data (after mapping): {list(df.columns) if 'df' in locals() else 'Could not determine'}\n"
-                        f"  > Columns in SQL table '{config.staging_table}': {table_columns}\n"
+                        f"  > Columns in SQL table '{current_staging_table}': {table_columns}\n"
                         f"  > ACTION: Update the 'column_mapping' in 'elt_pipeline_configs' for import_name '{config.import_name}' to map your source columns to the SQL table columns."
                     )
                     log_details["resolution_steps"] = resolution_steps
                 except Exception as inspect_e:
                     # If introspection fails, fall back to a generic message
-                    log_details["resolution_steps"] = f"A database schema error occurred. Could not automatically inspect table columns due to: {inspect_e}. Please manually check that the columns in your source file (or your column_mapping) match the schema of the table '{config.staging_table}'."
+                    log_details["resolution_steps"] = f"A database schema error occurred. Could not automatically inspect table columns due to: {inspect_e}. Please manually check that the columns in your source file (or your column_mapping) match the schema of the table '{current_staging_table}'."
             else:
                 # SECURITY: Avoid logging full stack traces to the database to prevent information disclosure.
                 # The full trace is still available in the Dagster UI/console for developers.
@@ -544,15 +561,33 @@ def create_transform_asset(config: PipelineConfig):
 
     # --- NEW: Support for explicit dependencies via scraper_config ---
     # This allows users to chain imports (e.g., ensure 'replace' runs before 'append')
+    static_has_upstream_dependency = False
+    upstream_imports = []
+
+    # 1. Check explicit 'depends_on' field (Preferred)
+    if config.depends_on:
+        upstream_imports.extend([d.strip() for d in config.depends_on.split(',') if d.strip()])
+
+    # 2. Check scraper_config (Legacy/Scraper support)
     if config.scraper_config:
         try:
             sc_config = json.loads(config.scraper_config)
             if isinstance(sc_config, dict) and "depends_on" in sc_config:
-                upstream_import = sc_config["depends_on"]
-                # We depend on the upstream's TRANSFORM asset to ensure it is fully complete
-                deps.append(AssetKey(sanitize_name(f"{upstream_import}_transform")))
-        except Exception:
+                # Handle both string and list for depends_on
+                depends_on_val = sc_config["depends_on"]
+                if isinstance(depends_on_val, str):
+                    upstream_imports.append(depends_on_val)
+                elif isinstance(depends_on_val, list):
+                    upstream_imports.extend(depends_on_val)
+        except Exception as e:
+            print(f"Warning: Failed to parse scraper_config for '{config.import_name}' during asset creation: {e}")
             pass # Ignore parsing errors
+
+    # Apply dependencies
+    for upstream_import in set(upstream_imports):
+        # We depend on the upstream's TRANSFORM asset to ensure it is fully complete
+        deps.append(AssetKey(sanitize_name(f"{upstream_import}_transform")))
+        static_has_upstream_dependency = True
 
     @asset(
         name=sanitized_transform_name, # Use the sanitized name
@@ -603,7 +638,7 @@ This asset moves data from staging to the final, production-ready table.
         # This prevents parallel runs (e.g. Replace vs Append) from overwriting each other.
         # We use a dedicated connection for the lock that stays open for the duration of the asset.
         lock_conn = engine.connect()
-        lock_resource = f"lock_{config.destination_table}"
+        lock_resource = f"lock_{config.destination_table.lower()}"
         try:
             context.log.info(f"Acquiring serialization lock for table '{config.destination_table}'...")
             # LockTimeout = -1 means wait indefinitely until the lock is available.
@@ -620,18 +655,51 @@ This asset moves data from staging to the final, production-ready table.
             # We fetch the current load_method from the DB to ensure we respect the latest state.
             current_load_method = config.load_method
             current_is_active = config.is_active
+            current_staging_table = config.staging_table
+            runtime_has_upstream_dependency = False
+
             try:
                 with engine.connect() as connection:
-                    result = connection.execute(
-                        text("SELECT load_method, is_active FROM elt_pipeline_configs WHERE import_name = :import_name"),
-                        {"import_name": import_name}
-                    ).mappings().one_or_none()
+                    # Try fetching with depends_on first, fall back if column doesn't exist yet
+                    try:
+                        result = connection.execute(
+                            text("SELECT load_method, is_active, scraper_config, staging_table, depends_on FROM elt_pipeline_configs WHERE import_name = :import_name"),
+                            {"import_name": import_name}
+                        ).mappings().one_or_none()
+                    except Exception:
+                        result = connection.execute(
+                            text("SELECT load_method, is_active, scraper_config, staging_table FROM elt_pipeline_configs WHERE import_name = :import_name"),
+                            {"import_name": import_name}
+                        ).mappings().one_or_none()
+
                     if result:
                         current_load_method = result['load_method']
                         current_is_active = bool(result['is_active'])
+                        if result['staging_table']:
+                            current_staging_table = result['staging_table']
                         context.log.info(f"Fetched runtime config for '{import_name}': load_method='{current_load_method}', is_active={current_is_active}")
+                        
+                        # Check depends_on from DB
+                        if 'depends_on' in result and result['depends_on']:
+                            runtime_has_upstream_dependency = True
+                            context.log.info(f"Runtime check detected dependency on '{result['depends_on']}'. Enforcing append mode.")
+
+                        # Check for dependency at runtime to handle cases where DB was updated but Dagster wasn't reloaded
+                        if result['scraper_config']:
+                            try:
+                                sc_rt = json.loads(result['scraper_config'])
+                                if isinstance(sc_rt, dict) and "depends_on" in sc_rt:
+                                    runtime_has_upstream_dependency = True
+                                    context.log.info(f"Runtime check detected dependency on '{sc_rt['depends_on']}'. Enforcing append mode.")
+                            except Exception as e:
+                                context.log.error(f"Failed to parse runtime scraper_config for dependency check: {e}. Defaulting to APPEND mode for safety.")
+                                runtime_has_upstream_dependency = True # SAFETY: Assume dependency exists to prevent data loss
+                    else:
+                        context.log.error(f"Runtime config for '{import_name}' not found in database. Defaulting to APPEND mode for safety.")
+                        current_load_method = 'append'
             except Exception as e:
-                context.log.warning(f"Failed to fetch runtime config for '{import_name}', using cached config. Error: {e}")
+                context.log.error(f"Failed to fetch runtime config for '{import_name}': {e}. Defaulting to APPEND mode for safety.")
+                current_load_method = 'append'
 
             start_time = datetime.utcnow()
 
@@ -643,15 +711,22 @@ This asset moves data from staging to the final, production-ready table.
                 "error_details": None, "resolution_steps": None # Initialize to None
             }
 
-            # --- SAFETY CHECK: Handle Queued Runs during Auto-Switch ---
-            # If this pipeline is now inactive, it might be because a previous run in this batch
-            # successfully completed and triggered the auto-switch to 'append'.
-            if not current_is_active:
-                # Only override to 'append' if this is a chain import (configured to auto-switch)
+            # --- DECISION LOGIC: Determine Truncation Strategy ---
+            should_truncate = False
+            decision_reason = ""
+
+            # Priority 1: Dependencies (Static or Runtime) -> ALWAYS APPEND
+            if static_has_upstream_dependency or runtime_has_upstream_dependency:
+                should_truncate = False
+                decision_reason = "Upstream dependency detected (Static or Runtime)."
+            
+            # Priority 2: Inactive Pipeline (Queued Run)
+            elif not current_is_active:
                 if config.on_success_deactivate_self_and_activate_import:
-                    context.log.info(f"Pipeline '{import_name}' is INACTIVE but is part of a chain (auto-switch). Treating this queued run as 'APPEND' to preserve data.")
-                    current_load_method = 'append'
+                    should_truncate = False
+                    decision_reason = "Pipeline is INACTIVE but part of an auto-switch chain (treating as queued run)."
                 else:
+                    # Truly inactive, skip execution
                     context.log.warning(f"Pipeline '{import_name}' is INACTIVE in the database. Skipping transform.")
                     log_details["status"] = "SKIPPED"
                     log_details["message"] = "Skipped because pipeline is inactive."
@@ -659,14 +734,47 @@ This asset moves data from staging to the final, production-ready table.
                     _log_asset_run(engine, log_details)
                     return
 
+            # Priority 3: Configured Load Method
+            elif current_load_method.lower() == 'append':
+                should_truncate = False
+                decision_reason = "Configured as APPEND."
+            
+            elif current_load_method.lower() == 'replace':
+                should_truncate = True
+                decision_reason = "Configured as REPLACE."
+
+                # --- SMART REPLACE (BATCH DETECTION) ---
+                # If multiple files trigger a REPLACE pipeline simultaneously (e.g. a batch drop),
+                # we want the first one to Truncate, and the subsequent ones to Append.
+                try:
+                    # Check if the destination table was updated very recently (last 2 minutes)
+                    # We use the lock_conn to ensure we see the most committed state
+                    check_time_stmt = text(f"SELECT MAX(load_timestamp) FROM {config.destination_table}")
+                    last_load_time = lock_conn.execute(check_time_stmt).scalar()
+                    
+                    if last_load_time:
+                        time_diff = datetime.utcnow() - last_load_time
+                        seconds_ago = time_diff.total_seconds()
+                        
+                        # If updated < 120 seconds ago, assume it's part of the same batch
+                        if 0 <= seconds_ago < 120: 
+                            should_truncate = False
+                            decision_reason = f"Downgraded REPLACE to APPEND. Table updated {int(seconds_ago)}s ago (Batch detection)."
+                            context.log.info(f"Batch detection: Last load was {last_load_time} ({int(seconds_ago)}s ago). Switching to APPEND.")
+                except Exception as e:
+                    context.log.debug(f"Smart Replace check skipped (Table might not have load_timestamp): {e}")
+            
+            else:
+                # Fallback for unknown states
+                should_truncate = False
+                decision_reason = f"Unknown load method '{current_load_method}', defaulting to APPEND."
+
             try:
                 context.log.info(f"Executing transform for '{import_name}': procedure {transform_procedure}")
+                context.log.info(f"Decision: Truncate? {should_truncate}. Reason: {decision_reason}")
 
-                tables_to_truncate_str = ""
-                if current_load_method.lower() == 'replace':
-                    tables_to_truncate_str = config.destination_table
-
-                context.log.info(f"Requesting truncation for destination tables: {tables_to_truncate_str or 'None'}")
+                tables_to_truncate_str = config.destination_table if should_truncate else None
+                context.log.info(f"Tables to truncate: {tables_to_truncate_str or 'None'}")
 
                 # --- Automated Deduplication for 'append' method ---
                 # Before calling the transform, if this is an append operation with a deduplication key,
@@ -674,7 +782,7 @@ This asset moves data from staging to the final, production-ready table.
                 with engine.connect() as connection: # This was also correct.
                     with connection.begin() as transaction:
                         # This logic only applies to 'append' mode with a specified deduplication key.
-                        if current_load_method.lower() == 'append' and config.deduplication_key:
+                        if not should_truncate and config.deduplication_key:
                             context.log.info(f"Performing pre-transform deduplication for '{config.import_name}' on key(s): '{config.deduplication_key}'")
                             
                             # Build the JOIN condition for the DELETE statement
@@ -687,7 +795,7 @@ This asset moves data from staging to the final, production-ready table.
                             # It only considers rows from the current run.
                             dedupe_sql = text(f"""
                                 DELETE s
-                                FROM {config.staging_table} s
+                                FROM {current_staging_table} s
                                 JOIN {config.destination_table} d ON {join_conditions}
                                 WHERE s.dagster_run_id = :run_id
                             """)
@@ -695,7 +803,7 @@ This asset moves data from staging to the final, production-ready table.
                             result = connection.execute(dedupe_sql, {"run_id": context.run_id})
                             
                             if result.rowcount > 0:
-                                context.log.info(f"Removed {result.rowcount} duplicate rows from '{config.staging_table}' before transformation.")
+                                context.log.info(f"Removed {result.rowcount} duplicate rows from '{current_staging_table}' before transformation.")
                             else:
                                 context.log.info(f"No duplicate rows found for '{config.import_name}'.")
                         
@@ -723,10 +831,10 @@ This asset moves data from staging to the final, production-ready table.
                         from sqlalchemy.sql import quoted_name
                         context.log.info(f"Cleaning up staging tables for run_id: {context.run_id}")
 
-                        safe_table_name = quoted_name(config.staging_table, quote=True)
+                        safe_table_name = quoted_name(current_staging_table, quote=True)
                         delete_stmt = text(f"DELETE FROM {safe_table_name} WHERE dagster_run_id = :run_id")
                         connection.execute(delete_stmt, {"run_id": context.run_id})
-                        context.log.info(f"Cleaned up staging table: {config.staging_table}")
+                        context.log.info(f"Cleaned up staging table: {current_staging_table}")
                         transaction.commit()
 
                 log_details["status"] = "SUCCESS"
@@ -743,9 +851,12 @@ This asset moves data from staging to the final, production-ready table.
                             deactivate_stmt = text("UPDATE elt_pipeline_configs SET is_active = 0 WHERE import_name = :self_import")
                             connection.execute(deactivate_stmt, {"self_import": triggering_import_name})
                             
-                            # Activate the target append pipeline
-                            activate_stmt = text("UPDATE elt_pipeline_configs SET is_active = 1 WHERE import_name = :target_import")
-                            connection.execute(activate_stmt, {"target_import": target_import_to_activate})
+                            # Activate the target append pipeline AND ensure it is set to append
+                            # This prevents data loss if the target pipeline was accidentally configured as 'replace'
+                            activate_stmt = text("UPDATE elt_pipeline_configs SET is_active = 1, load_method = 'append' WHERE import_name = :target_import")
+                            res = connection.execute(activate_stmt, {"target_import": target_import_to_activate})
+                            if res.rowcount == 0:
+                                context.log.error(f"CRITICAL: Failed to activate target import '{target_import_to_activate}': Import not found in database. Pipeline chain is broken!")
                             transaction.commit()
                     context.log.info(f"Successfully updated database. '{triggering_import_name}' is now inactive, and '{target_import_to_activate}' is active. The correct sensor will run on the next tick.")
             except Exception as e:
