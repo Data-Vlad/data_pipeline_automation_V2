@@ -896,23 +896,31 @@ This asset moves data from staging to the final, production-ready table.
                 # Check for downstream dependencies to suppress SUCCESS notifications
                 # We only want to notify when the *final* import in a chain completes.
                 suppress_success_notification = False
-                if log_details["status"] == "SUCCESS":
-                    try:
-                        with engine.connect() as conn:
-                            # Check if any active pipeline depends on this one
-                            dep_rows = conn.execute(
-                                text("SELECT import_name, depends_on FROM elt_pipeline_configs WHERE is_active = 1 AND depends_on IS NOT NULL")
-                            ).fetchall()
-                            
-                            for r_name, r_deps in dep_rows:
-                                if r_deps:
-                                    deps_list = [d.strip() for d in r_deps.split(',')]
-                                    if import_name in deps_list:
-                                        suppress_success_notification = True
-                                        context.log.info(f"Suppressing success notification: Active pipeline '{r_name}' depends on this import.")
-                                        break
-                    except Exception as e:
-                        context.log.warning(f"Failed to check downstream dependencies: {e}")
+                if log_details.get("status") == "SUCCESS":
+                    # 1. Check Batch Detection (Smart Replace)
+                    # If this was a batch append, suppress notification to avoid spam.
+                    if "decision_reason" in locals() and "Batch detection" in decision_reason:
+                        suppress_success_notification = True
+                        context.log.info("Suppressing success notification: This is a batch append run.")
+
+                    # 2. Check Downstream Dependencies
+                    if not suppress_success_notification:
+                        try:
+                            with engine.connect() as conn:
+                                # Check if any active pipeline depends on this one
+                                dep_rows = conn.execute(
+                                    text("SELECT import_name, depends_on FROM elt_pipeline_configs WHERE is_active = 1 AND depends_on IS NOT NULL")
+                                ).fetchall()
+                                
+                                for r_name, r_deps in dep_rows:
+                                    if r_deps:
+                                        deps_list = [d.strip().lower() for d in r_deps.split(',')]
+                                        if import_name.lower() in deps_list:
+                                            suppress_success_notification = True
+                                            context.log.info(f"Suppressing success notification: Active pipeline '{r_name}' depends on this import.")
+                                            break
+                        except Exception as e:
+                            context.log.warning(f"Failed to check downstream dependencies: {e}")
 
                 if not suppress_success_notification:
                     # --- NOTIFY USER (Success/Failure) ---
