@@ -71,7 +71,12 @@ def _show_toast_notification(status: str, pipeline_name: str, import_name: str, 
     try:
         title = f"File Processed: {import_name.replace('stg_', '')}"
         body = f"Status: {status.capitalize()}"
-        icon = "imageres.dll,-119" if status.upper() == 'SUCCESS' else "imageres.dll,-101"
+        
+        icon = "imageres.dll,-101" # Default (Failure/Warning)
+        if status.upper() == 'SUCCESS':
+            icon = "imageres.dll,-119"
+        elif status.upper() == 'STARTED':
+            icon = "imageres.dll,-1004" # Generic Info/Run icon
 
         # The `run_elt_service.bat` script ensures the BurntToast module is installed.
         # We can directly call it without checking for its existence here.
@@ -295,6 +300,21 @@ If it fails, check the run logs for details on data quality issues or parsing er
 
         try:
             context.log.info(f"Starting extraction for {config.import_name}...")
+            
+            # --- NOTIFY STARTED (Only if Root Pipeline) ---
+            # We only want to notify "Started" for the first import in a chain.
+            if not config.depends_on:
+                _show_toast_notification(
+                    status="STARTED",
+                    pipeline_name=config.pipeline_name,
+                    import_name=config.import_name,
+                    source_file=source_file_path if source_file_path else (config.file_pattern or "Manual Run"),
+                    message="Pipeline execution started."
+                )
+                # We don't necessarily need a persistent log file for "Started", 
+                # but it can be useful for debugging.
+                # _write_user_feedback_log(..., "STARTED", ...) 
+
 
             # Determine the actual file path to parse
             if source_file_path:
@@ -752,11 +772,10 @@ This asset moves data from staging to the final, production-ready table.
                 # we want the first one to Truncate, and the subsequent ones to Append.
                 try:
                     # Check if the destination table was updated very recently (last 2 minutes)
-                    # FIX: Use a FRESH connection with READ COMMITTED isolation to ensure we see the absolute latest committed data
-                    # regardless of the lock connection's transaction state.
-                    # We also add WITH (READCOMMITTEDLOCK) to force SQL Server to bypass Snapshot Isolation (RCSI)
-                    # and read the actual current committed data.
-                    with engine.connect().execution_options(isolation_level="READ COMMITTED") as check_conn:
+                    # FIX: Use a FRESH connection and WITH (READCOMMITTEDLOCK).
+                    # The table hint forces SQL Server to ignore Snapshot Isolation (RCSI) and acquire 
+                    # a shared lock to read the absolute latest committed data.
+                    with engine.connect() as check_conn:
                         check_time_stmt = text(f"SELECT MAX(load_timestamp), GETUTCDATE() FROM {config.destination_table} WITH (READCOMMITTEDLOCK)")
                         time_check_row = check_conn.execute(check_time_stmt).fetchone()
                     
