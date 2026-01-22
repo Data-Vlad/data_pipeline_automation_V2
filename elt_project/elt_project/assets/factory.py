@@ -203,10 +203,26 @@ def create_extract_and_load_asset(config: PipelineConfig):
         # Add other custom parser function names here as they are created, e.g., "parse_my_unique_data_file",
     }
     
+    # Define which parsers are considered "Ingestion" (Scrapers/Downloaders)
+    INGESTION_FUNCTIONS = {
+        "generic_web_scraper",
+        "generic_selenium_scraper",
+        "generic_sftp_downloader"
+    }
+
     # Sanitize the asset name to be valid in Dagster. This was the source of the error.
     # The old name format was "1. Extract & Stage: {config.import_name}" which is invalid.
     # We now use a sanitized, valid name.
-    asset_name = sanitize_name(f"{config.import_name}_extract_and_load_staging")
+    
+    # Determine if this is an Ingestion asset or an ELT asset based on the parser
+    is_ingestion = config.parser_function in INGESTION_FUNCTIONS
+    
+    if is_ingestion:
+        asset_name = sanitize_name(f"{config.import_name}_ingest")
+        desc_action = "Ingests (Downloads/Scrapes)"
+    else:
+        asset_name = sanitize_name(f"{config.import_name}_extract_and_load_staging")
+        desc_action = "Extracts and Loads"
 
     # --- NEW: Support for explicit dependencies via scraper_config ---
     deps = []
@@ -217,7 +233,7 @@ def create_extract_and_load_asset(config: PipelineConfig):
         deps=deps,
         compute_kind="python",
         description=f"""
-**Extracts, validates, and stages data for the '{config.import_name}' import.**
+**{desc_action} data for the '{config.import_name}' import.**
 
 This is the first step in the '{config.pipeline_name}' pipeline. It performs the following actions:
 
@@ -388,7 +404,7 @@ If it fails, check the run logs for details on data quality issues or parsing er
                             raise ValueError(f"Custom parser function '{config.parser_function}' is not whitelisted.")
                         context.log.info(f"Using custom parser function '{config.parser_function}' for file: {file_to_parse}")
                         if config.parser_function == "generic_selenium_scraper":
-                            custom_parser_func = selenium_logic.generic_selenium_scraper
+                            custom_parser_func = custom_parsers.generic_selenium_scraper
                         else:
                             custom_parser_func = getattr(custom_parsers, config.parser_function)
                         # SECURITY: Add an extra check to ensure the retrieved attribute is actually a function.
@@ -567,11 +583,21 @@ def create_transform_asset(config: PipelineConfig):
     transform_procedure = config.transform_procedure
     pipeline_group_name = pipeline_name.strip().lower()
 
+    # Define which parsers are considered "Ingestion" to resolve the upstream dependency name
+    INGESTION_FUNCTIONS = {
+        "generic_web_scraper",
+        "generic_selenium_scraper",
+        "generic_sftp_downloader"
+    }
+    is_ingestion = config.parser_function in INGESTION_FUNCTIONS
+
     # Sanitize the asset name to be valid in Dagster.
     sanitized_transform_name = sanitize_name(f"{import_name}_transform")
 
     # Define dependencies on the specific extract asset
-    deps = [AssetKey(sanitize_name(f"{import_name}_extract_and_load_staging"))]
+    # We must match the name generated in create_extract_and_load_asset
+    upstream_suffix = "_ingest" if is_ingestion else "_extract_and_load_staging"
+    deps = [AssetKey(sanitize_name(f"{import_name}{upstream_suffix}"))]
 
     # --- NEW: Support for explicit dependencies via scraper_config ---
     # This allows users to chain imports (e.g., ensure 'replace' runs before 'append')

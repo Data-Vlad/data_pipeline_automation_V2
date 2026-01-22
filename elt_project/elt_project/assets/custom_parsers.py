@@ -109,13 +109,15 @@ def generic_selenium_scraper(scraper_config_json: str) -> dict[str, pd.DataFrame
     """
     # --- Lazy Import Selenium and related libraries ---
     # This ensures these packages are only imported when this function is actually called.
-    import pyotp
-    from selenium import webdriver
-    from selenium.webdriver.common.by import By
-    from selenium.webdriver.support.ui import WebDriverWait
-    from selenium.webdriver.support import expected_conditions as EC
-    from webdriver_manager.chrome import ChromeDriverManager
-    from selenium.webdriver.chrome.service import Service as ChromeService
+    try:
+        from selenium import webdriver
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.support.ui import WebDriverWait
+        from selenium.webdriver.support import expected_conditions as EC
+        from webdriver_manager.chrome import ChromeDriverManager
+        from selenium.webdriver.chrome.service import Service as ChromeService
+    except ImportError as e:
+        raise ImportError(f"Missing required scraping library: {e}. Please ensure 'selenium' and 'webdriver-manager' are installed.")
 
     # --- Helper function for data extraction ---
     def _extract_data(driver, extraction_config):
@@ -175,6 +177,7 @@ def generic_selenium_scraper(scraper_config_json: str) -> dict[str, pd.DataFrame
                 element.send_keys(value)
 
             elif action_type == "find_and_fill_totp":
+                import pyotp
                 secret = os.getenv(action["totp_secret_env_var"])
                 if secret is None:
                     raise ValueError(f"Environment variable '{action['totp_secret_env_var']}' for TOTP secret not set.")
@@ -231,7 +234,10 @@ def generic_selenium_scraper(scraper_config_json: str) -> dict[str, pd.DataFrame
     options.add_argument("--disable-gpu")
     options.add_argument("--window-size=1920,1080")
 
-    driver = webdriver.Chrome(service=ChromeService(ChromeDriverManager().install()), options=options)
+    try:
+        driver = webdriver.Chrome(service=ChromeService(ChromeDriverManager().install()), options=options)
+    except Exception as e:
+        raise RuntimeError(f"Failed to initialize Selenium WebDriver. Ensure Google Chrome is installed. Error: {e}")
 
     scraped_data = {}
     scraped_data_accumulator = {} # For multi-page results

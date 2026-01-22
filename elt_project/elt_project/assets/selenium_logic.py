@@ -2,19 +2,16 @@ import json
 import os
 import time
 import pandas as pd
-import pyotp
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service as ChromeService
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from webdriver_manager.chrome import ChromeDriverManager
 
 def generic_selenium_scraper(config_json: str):
     """
     Executes a Selenium-based scraping workflow defined in JSON.
     Supports TOTP generation for automated 2FA.
     """
+    from selenium import webdriver
+    from selenium.webdriver.chrome.service import Service as ChromeService
+    from webdriver_manager.chrome import ChromeDriverManager
+
     config = json.loads(config_json)
     
     # --- 1. Setup Driver ---
@@ -61,6 +58,8 @@ def generic_selenium_scraper(config_json: str):
         driver.quit()
 
 def _perform_action(driver, action):
+    import pyotp
+
     action_type = action["type"]
     
     if action_type == "wait":
@@ -94,6 +93,10 @@ def _perform_action(driver, action):
         _find_element(driver, action, timeout=timeout)
 
 def _find_element(driver, action, timeout=10):
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+
     by_map = {
         "id": By.ID, "css_selector": By.CSS_SELECTOR, "xpath": By.XPATH,
         "name": By.NAME, "class_name": By.CLASS_NAME

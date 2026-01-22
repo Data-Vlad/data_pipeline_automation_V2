@@ -6,7 +6,7 @@ import logging
 from collections import defaultdict
 from typing import List, Optional, Any
 from dotenv import load_dotenv
-from dagster import DagsterInstance, DagsterRunStatus
+from dagster import DagsterInstance, DagsterRunStatus, DagsterEventType
 from dagster._core.utils import make_new_run_id
 from dagster._core.workspace.context import WorkspaceProcessContext
 from dagster._core.workspace.load_target import WorkspaceFileTarget
@@ -39,6 +39,11 @@ logging.basicConfig(
     # The launcher script will redirect stdout/stderr to a log file.
 )
 logger = logging.getLogger(__name__)
+
+# Explicitly log to simple_ui.log to ensure errors are captured in a known file
+file_handler = logging.FileHandler('simple_ui.log')
+file_handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)-8s - %(message)s"))
+logger.addHandler(file_handler)
 
 app = Flask(__name__)
 app.template_folder = 'templates'
@@ -278,12 +283,18 @@ def favicon():
 def get_pipelines():
     """
     API endpoint to fetch all active pipelines and their associated imports from the database.
-    This data is used to populate the main checklist on the UI.
+    This data is used to populate the main checklist on the UI, with a clear separation
+    between file-based imports and web/SFTP scrapers.
     """
     logger.info("API     : Fetching pipeline configurations from database...")
-    pipelines = []
+    
     # Use a defaultdict to easily group imports under their parent pipeline.
-    pipeline_groups = defaultdict(lambda: {"imports": [], "monitored_directory": None})
+    # We now have separate lists for file-based imports and scrapers.
+    pipeline_groups = defaultdict(lambda: {
+        "load_imports": [], 
+        "ingest_imports": [], 
+        "monitored_directory": None
+    })
 
     for attempt in range(2):  # Allow one retry
         try:
@@ -297,19 +308,20 @@ def get_pipelines():
             """)
             results = conn.execute(query).fetchall()  # Eagerly fetch all results
 
-            # Group the flat SQL results into a nested structure.
+            # Group the flat SQL results into a nested structure with separation.
             for row in results:  # Iterate over the fetched results
-                # Determine if this is a scraper based on the parser function
                 is_scraper = row.parser_function in [
                     'generic_selenium_scraper', 
                     'generic_web_scraper', 
                     'generic_sftp_downloader'
                 ]
                 
-                pipeline_groups[row.pipeline_name]["imports"].append({
-                    "import_name": row.import_name,
-                    "is_scraper": is_scraper
-                })
+                import_data = {"import_name": row.import_name}
+
+                if is_scraper:
+                    pipeline_groups[row.pipeline_name]["ingest_imports"].append(import_data)
+                else:
+                    pipeline_groups[row.pipeline_name]["load_imports"].append(import_data)
 
                 if row.monitored_directory:
                     pipeline_groups[row.pipeline_name]["monitored_directory"] = os.path.normpath(
@@ -317,8 +329,13 @@ def get_pipelines():
                     )
 
             # Convert the grouped data into a list format for the JSON response.
-            for pipeline_name, data in pipeline_groups.items():
-                pipelines.append({"pipeline_name": pipeline_name, **data})
+            # Filter out any pipeline groups that have no imports at all.
+            pipelines = [
+                {"pipeline_name": pipeline_name, **data} 
+                for pipeline_name, data in pipeline_groups.items()
+                if data["load_imports"] or data["ingest_imports"]
+            ]
+            
             logger.info(f"API     : Successfully fetched and processed {len(pipelines)} pipelines.")
             return jsonify(pipelines)
 
@@ -352,7 +369,8 @@ def run_imports():
             logger.warning("API     : 'run_imports' called with no imports selected.")
             return jsonify({"error": "No imports selected"}), 400
 
-        logger.info(f"API     : Received request to run {len(selected_imports)} imports: {[item['import_name'] for item in selected_imports]}")
+        import_names = [item['import_name'] if isinstance(item, dict) else item for item in selected_imports]
+        logger.info(f"API     : Received request to run {len(selected_imports)} imports: {import_names}")
 
         workspace_file_path = os.path.join(dagster_home_path, "workspace.yaml")
         instance = DagsterInstance.get()
@@ -384,7 +402,10 @@ def run_imports():
             results = []
 
             for item in selected_imports:
-                import_name = item["import_name"]
+                if isinstance(item, dict):
+                    import_name = item["import_name"]
+                else:
+                    import_name = item
                 sensor_name = f"sensor_{import_name}"
                 logger.info(f"API     :  - Submitting tick for sensor '{sensor_name}'...")
 
@@ -512,10 +533,21 @@ def get_run_status(run_id):
         if not run:
             return jsonify({"error": "Run not found"}), 404
             
-        return jsonify({
+        response_data = {
             "run_id": run_id,
             "status": run.status.value
-        })
+        }
+
+        # If failed, fetch the specific error message from the logs
+        if run.status == DagsterRunStatus.FAILURE:
+            logs = instance.all_logs(run_id, of_type=DagsterEventType.STEP_FAILURE)
+            if logs:
+                # Extract the error message from the first failure event
+                evt_data = logs[0].dagster_event.event_specific_data
+                if evt_data and hasattr(evt_data, 'error') and evt_data.error:
+                    response_data["error_message"] = evt_data.error.message
+
+        return jsonify(response_data)
     except Exception as e:
         logger.error(f"API     : Failed to fetch status for run '{run_id}'.", exc_info=True)
         return jsonify({"error": str(e)}), 500
@@ -556,6 +588,7 @@ if __name__ == "__main__":
     init_thread.start()
 
     logger.info("Server  : Starting Data Importer UI on http://localhost:3000")
+    logger.info(f"Server  : Logging detailed errors to {os.path.abspath('simple_ui.log')}")
     logger.info("Server  : Initialization is running in the background...")
     
     # The server starts immediately. The launcher script (`.bat` file) is responsible
