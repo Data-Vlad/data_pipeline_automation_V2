@@ -7,7 +7,7 @@ import logging
 from collections import defaultdict
 from typing import List, Optional, Any
 from dotenv import load_dotenv
-from dagster import DagsterInstance, DagsterRunStatus, DagsterEventType
+from dagster import DagsterInstance, DagsterRunStatus
 from dagster._core.utils import make_new_run_id
 from dagster._core.workspace.context import WorkspaceProcessContext
 from dagster._core.workspace.load_target import WorkspaceFileTarget
@@ -572,15 +572,6 @@ def get_run_status(run_id):
             "run_id": run_id,
             "status": run.status.value
         }
-
-        # If failed, fetch the specific error message from the logs
-        if run.status == DagsterRunStatus.FAILURE:
-            logs = instance.all_logs(run_id, of_type=DagsterEventType.STEP_FAILURE)
-            if logs:
-                # Extract the error message from the first failure event
-                evt_data = logs[0].dagster_event.event_specific_data
-                if evt_data and hasattr(evt_data, 'error') and evt_data.error:
-                    response_data["error_message"] = evt_data.error.message
 
         return jsonify(response_data)
     except Exception as e:

@@ -3,6 +3,7 @@ import os
 import json
 import time
 import tempfile
+import shutil
 import traceback
 
 def parse_ri_dbt_custom(file_path: str) -> pd.DataFrame:
@@ -267,13 +268,44 @@ def generic_selenium_scraper(scraper_config_json: str) -> dict[str, pd.DataFrame
     options.add_argument("--disable-gpu")
     options.add_argument("--window-size=1920,1080")
 
+    # --- WebDriver Initialization with Cache Clearing Retry ---
     try:
-        print("DEBUG: Initializing Selenium WebDriver...")
+        print("DEBUG: Initializing Selenium WebDriver (Attempt 1)...")
         driver = webdriver.Chrome(service=ChromeService(ChromeDriverManager().install()), options=options)
         print("DEBUG: WebDriver initialized successfully.")
+    except OSError as e:
+        if "[WinError 193]" in str(e):
+            _log_error_to_simple_ui(f"WebDriver Init Failed with WinError 193. Clearing cache and retrying. Error: {e}")
+            print("WARNING: WebDriver initialization failed with WinError 193. This often indicates a corrupt driver cache.")
+            print("WARNING: Clearing webdriver-manager cache and retrying...")
+            
+            # Define the default cache path and remove it
+            cache_path = os.path.join(os.path.expanduser("~"), ".wdm")
+            if os.path.exists(cache_path):
+                try:
+                    shutil.rmtree(cache_path)
+                    print(f"INFO: Successfully removed cache directory: {cache_path}")
+                except Exception as remove_err:
+                    _log_error_to_simple_ui(f"Failed to clear cache at {cache_path}. Error: {remove_err}")
+                    print(f"ERROR: Could not remove cache directory: {cache_path}. Please remove it manually. Error: {remove_err}")
+                    # Re-raise the original error if we can't even clear the cache
+                    raise e
+
+            # Retry initialization
+            try:
+                print("DEBUG: Initializing Selenium WebDriver (Attempt 2)...")
+                driver = webdriver.Chrome(service=ChromeService(ChromeDriverManager().install()), options=options)
+                print("DEBUG: WebDriver initialized successfully on second attempt.")
+            except Exception as e2:
+                _log_error_to_simple_ui(f"WebDriver Init Failed on second attempt: {e2}\n{traceback.format_exc()}")
+                raise RuntimeError(f"Failed to initialize Selenium WebDriver after clearing cache. Error: {e2}")
+        else:
+            # It's a different OSError, so just log and raise it
+            _log_error_to_simple_ui(f"WebDriver Init Failed: {e}\n{traceback.format_exc()}")
+            raise RuntimeError(f"Failed to initialize Selenium WebDriver. Ensure Google Chrome is installed. Error: {e}")
     except Exception as e:
+        # Catch any other non-OSError exceptions on the first try
         _log_error_to_simple_ui(f"WebDriver Init Failed: {e}\n{traceback.format_exc()}")
-        traceback.print_exc()
         raise RuntimeError(f"Failed to initialize Selenium WebDriver. Ensure Google Chrome is installed. Error: {e}")
 
     scraped_data = {}
