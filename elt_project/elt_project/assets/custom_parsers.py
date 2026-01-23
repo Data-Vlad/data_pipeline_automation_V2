@@ -483,7 +483,8 @@ def generic_selenium_scraper(scraper_config_json: str) -> dict[str, pd.DataFrame
                 scraped_data[target_name] = df
 
     except Exception as e:
-        _log_error_to_simple_ui(f"Scraping Runtime Error: {e}\n{traceback.format_exc()}")
+        import_name = config.get("import_name", "Unknown_Import") if 'config' in locals() else "Unknown"
+        _log_error_to_simple_ui(f"Scraping Runtime Error for '{import_name}':\n{e}\n\nStack Trace:\n{traceback.format_exc()}")
         raise e
 
     finally:
