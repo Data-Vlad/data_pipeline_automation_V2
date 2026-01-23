@@ -401,6 +401,11 @@ def generic_selenium_scraper(scraper_config_json: str) -> dict[str, pd.DataFrame
             target_name = extraction_target.get("target_import_name")
             if not target_name:
                 raise ValueError("Each item in 'data_extraction' must have a 'target_import_name'.")
+            
+            # Execute specific actions for this extraction (e.g. navigation, clicking tabs)
+            if "actions" in extraction_target:
+                _process_actions(driver, extraction_target["actions"], scraped_data_accumulator)
+
             df = _extract_data(driver, extraction_target)
             if not df.empty:
                 # NEW: Save the extracted data to a file if 'output_file' is specified
