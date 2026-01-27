@@ -2,6 +2,8 @@ from dagster import asset, AssetExecutionContext
 import pandas as pd
 from sqlalchemy import create_engine, text
 import os
+import requests
+import json
 from dotenv import load_dotenv
 from elt_project.core.ml_engine import MLEngine
 
@@ -57,6 +59,20 @@ def run_predictive_analytics(context: AssetExecutionContext):
                 
                 if not anomalies.empty:
                     results.append(anomalies[['run_id', 'target_table', 'model_type', 'prediction_date', 'actual_value', 'is_anomaly', 'anomaly_score']])
+                    
+                    # --- ALERTING LOGIC ---
+                    webhook_url = row.get('alert_webhook_url')
+                    if webhook_url:
+                        count = len(anomalies)
+                        msg = {
+                            "text": f"🚨 **Anomaly Alert**: Detected {count} anomalies in `{target_table}`.\n"
+                                    f"Check the dashboard for details."
+                        }
+                        try:
+                            requests.post(webhook_url, json=msg)
+                            context.log.info(f"Sent alert to webhook for {target_table}")
+                        except Exception as req_err:
+                            context.log.error(f"Failed to send alert: {req_err}")
 
             elif model_type == 'forecast':
                 forecast_df = MLEngine.generate_forecast(df, date_col, value_col)

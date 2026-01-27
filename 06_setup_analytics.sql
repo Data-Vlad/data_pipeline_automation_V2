@@ -7,6 +7,7 @@ CREATE TABLE analytics_config (
     date_column NVARCHAR(255) NOT NULL,  -- The time-series column
     value_column NVARCHAR(255) NOT NULL, -- The metric to forecast/analyze
     model_type NVARCHAR(50) DEFAULT 'anomaly_detection', -- 'anomaly_detection' or 'forecast'
+    alert_webhook_url NVARCHAR(MAX) NULL, -- Optional: Slack/Teams webhook for alerts
     is_active BIT DEFAULT 1
 );
 GO
