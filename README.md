@@ -40,12 +40,6 @@ You can explicitly chain pipelines to ensure correct execution order using the `
 *   **Toast Notifications**: (Windows) Instant desktop notifications upon file processing success or failure.
 *   **Local Logs**: Writes simple, readable success/failure logs back to the monitored directory (e.g., `2023-11-20__run_history.log`) for non-technical users.
 
-### 7. 🤖 Modern Analytics & AI
-*   **Automated Forecasting**: Built-in ML engine automatically generates forecasts for time-series data found in destination tables.
-*   **Anomaly Detection**: Uses Isolation Forest algorithms to automatically flag data points that deviate significantly from the norm.
-*   **Interactive Analytics UI**: A separate, modern **Streamlit** application (`analytics_ui.py`) allows users to explore data, view dashboards, and visualize AI predictions interactively.
-*   **Metadata-Driven**: Just like pipelines, you configure which tables to analyze in the `analytics_config` table, and the system handles the rest.
-
 ## Core Concepts
 
 It's crucial to distinguish between data parsing and data transformation within this framework:
@@ -70,7 +64,6 @@ This separation keeps the Python code focused on technical parsing, while busine
     *   **Custom Python**: Write bespoke Python functions for unique file formats.
 *   **Integrated Data Quality Framework**: Define data quality rules (e.g., `NOT_NULL`, `UNIQUE`, `REGEX_MATCH`) in a SQL table. The framework automatically validates staged data and can halt pipelines on critical failures.
 *   **Automated Data Enrichment for Missing Fields**: Dynamically fill missing or null values in staged data by performing lookups against existing database tables, configured via metadata.
-
 *   **Advanced Load Methods**: Supports both `replace` (full refresh) and `append` (incremental) load patterns, with built-in, automated deduplication for append-based pipelines.
 *   **Robust Logging & Auditing**: Logs detailed run information, row counts, errors, and data quality results to a dedicated SQL table for analytics and auditing.
 *   **Developer Acceleration Utilities**: A suite of one-click utility assets to accelerate development and maintenance.
@@ -79,7 +72,6 @@ This separation keeps the Python code focused on technical parsing, while busine
     *   **Database Backup**: A one-click asset that scripts out the data from critical configuration and log tables to `.sql` files for versioning or disaster recovery.
     *   **Local Scraper Testing**: A command-line script (`test_scraper_config.py`) allows for rapid, local testing of complex scraper configurations before deployment to the database.
 *   **Security Hardening**: Includes built-in protections against common vulnerabilities like arbitrary code execution, path traversal, and SQL injection.
-*   **AI Integration**: Native support for `scikit-learn` based predictive modeling assets.
 
 ## 3. Getting Started
 
@@ -108,7 +100,6 @@ pip install -e .
     2.  `02_setup_data_governance.sql` (Creates data quality tables)
     3.  `03_manage_elt_pipeline_configs.sql` (Creates the main config table)
     4.  `05_setup_data_enrichment.sql` (Creates enrichment rules table)
-    5.  `06_setup_analytics.sql` (Creates analytics config and prediction tables)
     5.  *(Execute any other custom table/procedure scripts you have)*
 
 > **Note**: The SQL files in the `sql/` directory are numbered to suggest an execution order.
@@ -134,14 +125,6 @@ DB_TRUST_SERVER_CERTIFICATE="yes"
     dagster dev
     ```
 2.  **Open the UI**: Navigate to `http://localhost:3000` in your web browser. You should see the assets and jobs that have been dynamically generated.
-
-### 3.6. Running the Analytics UI
-
-To launch the modern analytics dashboard:
-```bash
-streamlit run analytics_ui.py
-```
-This will open a new tab in your browser (usually `http://localhost:8501`) with the interactive dashboard.
 
 ## 4. How to Add a New Pipeline (The Easy Way)
 
@@ -2494,63 +2477,3 @@ A shortcut to this batch file will also be created on your Desktop for easy acce
 *   `elt_project/sensors.py`: File sensor logic.
 *   `elt_project/definitions.py`: Main entry point for Dagster.
 *   `simple_ui.py`: The Flask-based user interface.
-
-
-### 7.5. Smart Auto-Dashboards
-
-The **Auto-Dashboards** feature uses the ML Engine to automatically determine the best way to visualize any table in your database, without manual configuration.
-
-**How it works:**
-1.  **Data Inspection**: When you select a table, the engine samples the data to identify column types (Numeric, Date/Time, Categorical).
-2.  **Pattern Recognition**: It applies heuristic logic to detect patterns:
-    *   **Time Series**: If a Date and Numeric column are found.
-    *   **Correlation**: If 3+ Numeric columns are found.
-    *   **Scatter Plot**: If exactly 2 Numeric columns are found.
-    *   **Bar Chart**: If Categorical and Numeric columns are found.
-    *   **Distribution**: If a single Numeric column is found.
-3.  **Auto-Rendering**: The system dynamically generates the appropriate interactive Plotly chart based on the recommendation.
-
----
-
-## 8. Data Stewardship & Master Data Management (MDM)
-
-The **Data Steward** interface allows authorized users to manually intervene in the data pipeline. It provides a spreadsheet-like view for editing database tables directly from the web browser, eliminating the need for direct SQL access or re-uploading source files to fix minor errors.
-
-### 8.1. Features
-*   **Interactive Grid**: Sort, filter, and edit data just like in Excel.
-*   **Schema-Aware**: Respects the underlying database schema (columns and data types).
-*   **Safe Updates**: Uses a transaction-safe method to update records without destroying table structures.
-*   **Filtered Access**: Restricts editing to Staging (`stg_`) and Dimension (`dim_`) tables to protect system integrity.
-
-### 8.2. Common Scenarios
-
-#### Scenario A: Correcting Data Quality Failures
-A pipeline fails because a row in `stg_sales` has a `Country` code of 'USA ' (with a trailing space) which violates a foreign key constraint.
-1.  Go to **Data Steward**.
-2.  Select `stg_sales`.
-3.  Find the row with 'USA '.
-4.  Edit the cell to 'USA'.
-5.  Click **Save Changes**.
-6.  Re-run the **Transform** asset in Dagster.
-
-#### Scenario B: Managing Lookup Tables
-You need to add a new product category to your mapping table.
-1.  Go to **Data Steward**.
-2.  Select `dim_product_categories`.
-3.  Scroll to the bottom and add a new row: `Category_ID: 105`, `Name: 'Smart Home'`.
-4.  Click **Save Changes**.
-5.  The new category is immediately available for enrichment rules.
-
-### 8.3. Implementation Details
-
-The Data Steward module is built into `analytics_ui.py` using Streamlit's `data_editor` widget.
-
-**How Saving Works:**
-When you click "Save Changes", the application performs the following atomic operation:
-1.  **Connect**: Opens a transaction with the SQL Server database.
-2.  **Truncate**: Executes `DELETE FROM [Selected_Table]`. This clears the data but keeps the table definition (keys, indexes, types) intact.
-3.  **Insert**: Bulk inserts the data from the UI grid back into the table.
-4.  **Commit**: If all steps succeed, the transaction is committed. If any error occurs (e.g., data type mismatch), the transaction rolls back, and the original data is restored.
-
-**Configuration:**
-No additional configuration is required. The module automatically scans the database for tables matching the pattern `stg_%` or `dim_%`. To expose more tables, modify the SQL query in the `Data Steward` section of `analytics_ui.py`.
