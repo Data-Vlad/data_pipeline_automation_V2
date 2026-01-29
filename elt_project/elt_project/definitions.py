@@ -98,7 +98,7 @@ def load_all_definitions_from_db(db_resource: SQLServerResource) -> Tuple[list, 
         single_import_job = define_asset_job(
             name=f"{pipeline_config.import_name}_job",
             selection=AssetSelection.assets(extract_asset).downstream(),
-            tags={"dagster/concurrency_key": "global_elt_pipeline_lock"}
+            tags={"dagster/concurrency_key": f"lock_{pipeline_config.pipeline_name.strip().lower()}"}
         )
         all_jobs.append(single_import_job)
         jobs_by_import_name[pipeline_config.import_name] = single_import_job.name
@@ -111,7 +111,7 @@ def load_all_definitions_from_db(db_resource: SQLServerResource) -> Tuple[list, 
         define_asset_job(
             name=job_name, 
             selection=AssetSelection.groups(job_name),
-            tags={"dagster/concurrency_key": "global_elt_pipeline_lock"}
+            tags={"dagster/concurrency_key": f"lock_{job_name}"}
         ) 
         for job_name in configs_by_pipeline.keys()
     ]
