@@ -12,7 +12,7 @@ from dagster import asset, AssetExecutionContext, AssetKey
 from dagster import MetadataValue, Config
 from .models import PipelineConfig # This is correct, models.py is in the same directory
 from .resources import SQLServerResource
-from . import parsers, custom_parsers, selenium_logic
+from . import parsers, custom_parsers
 from .sql_loader import load_df_to_sql, execute_stored_procedure, load_csv_to_sql_chunked
 
 def sanitize_name(name: str) -> str:
@@ -203,26 +203,10 @@ def create_extract_and_load_asset(config: PipelineConfig):
         # Add other custom parser function names here as they are created, e.g., "parse_my_unique_data_file",
     }
     
-    # Define which parsers are considered "Ingestion" (Scrapers/Downloaders)
-    INGESTION_FUNCTIONS = {
-        "generic_web_scraper",
-        "generic_selenium_scraper",
-        "generic_sftp_downloader"
-    }
-
     # Sanitize the asset name to be valid in Dagster. This was the source of the error.
     # The old name format was "1. Extract & Stage: {config.import_name}" which is invalid.
     # We now use a sanitized, valid name.
-    
-    # Determine if this is an Ingestion asset or an ELT asset based on the parser
-    is_ingestion = config.parser_function in INGESTION_FUNCTIONS
-    
-    if is_ingestion:
-        asset_name = sanitize_name(f"{config.import_name}_ingest")
-        desc_action = "Ingests (Downloads/Scrapes)"
-    else:
-        asset_name = sanitize_name(f"{config.import_name}_extract_and_load_staging")
-        desc_action = "Extracts and Loads"
+    asset_name = sanitize_name(f"{config.import_name}_extract_and_load_staging")
 
     # --- NEW: Support for explicit dependencies via scraper_config ---
     deps = []
@@ -233,7 +217,7 @@ def create_extract_and_load_asset(config: PipelineConfig):
         deps=deps,
         compute_kind="python",
         description=f"""
-**{desc_action} data for the '{config.import_name}' import.**
+**Extracts, validates, and stages data for the '{config.import_name}' import.**
 
 This is the first step in the '{config.pipeline_name}' pipeline. It performs the following actions:
 
@@ -345,37 +329,33 @@ If it fails, check the run logs for details on data quality issues or parsing er
             if not file_to_parse:
                 raise ValueError("No source file path provided or configured for extraction.")
 
+            # --- Resolve wildcards/globs for ALL file types ---
+            # This ensures that Excel, PSV, and custom parsers also support file patterns.
+            import glob
+            if any(ch in str(file_to_parse) for ch in ["*", "?", "["]):
+                matches = glob.glob(file_to_parse, recursive=True)
+                if not matches and config.monitored_directory:
+                    pattern2 = os.path.join(config.monitored_directory, os.path.basename(file_to_parse))
+                    matches = glob.glob(pattern2, recursive=True)
+
+                if not matches:
+                    context.log.warning(f"Source file not found for {config.import_name}: '{file_to_parse}'. Skipping.")
+                    log_details["status"] = "SUCCESS"
+                    log_details["message"] = f"Source file not found: '{file_to_parse}'. No data loaded."
+                    return pd.DataFrame()
+                
+                resolved_path = max(matches, key=os.path.getmtime)
+                context.log.info(f"Resolved pattern '{file_to_parse}' to file '{resolved_path}'")
+                file_to_parse = resolved_path
+            
+            resolved_path_for_feedback = file_to_parse
+
             # OPTIMIZATION: Use chunked loading for standard CSVs to save memory
             if config.file_type.lower() == 'csv' and not config.parser_function:
                 try:
-                    import glob
-                    # Resolve wildcards/globs to an actual file path (pandas cannot read a glob pattern)
-                    # This is the path that will be used for logging user feedback
-                    resolved_path = file_to_parse
-                    if any(ch in str(file_to_parse) for ch in ["*", "?", "["]):
-                        # If file_to_parse is already an absolute pattern keep it, otherwise join with monitored dir
-                        pattern = file_to_parse
-                        matches = glob.glob(pattern, recursive=True) # Use recursive for potential **/ patterns
-                        # If no matches, try joining with monitored_directory if available
-                        if not matches and config.monitored_directory:
-                            pattern2 = os.path.join(config.monitored_directory, os.path.basename(pattern))
-                            matches = glob.glob(pattern2, recursive=True)
-
-                        if not matches:
-                            raise FileNotFoundError(f"No files matched the pattern '{file_to_parse}'")
-                        # Choose the most recently modified file if multiple matches
-                        resolved_path = max(matches, key=os.path.getmtime)
-                        context.log.info(f"Resolved pattern '{file_to_parse}' to file '{resolved_path}'")
-                    else:
-                        # If it's not a glob, it might be a relative path. Join with monitored_directory if it exists.
-                        resolved_path = file_to_parse
-
-                    # Ensure the path used for user feedback is the resolved one
-                    resolved_path_for_feedback = resolved_path
-
-                    context.log.info(f"Using memory-efficient chunked CSV loader for {resolved_path}")
+                    context.log.info(f"Using memory-efficient chunked CSV loader for {file_to_parse}")
                     rows_processed = load_csv_to_sql_chunked(
-                        file_path=resolved_path,
+                        file_path=file_to_parse,
                         table_name=current_staging_table,
                         engine=engine,
                         run_id=context.run_id,
@@ -399,34 +379,20 @@ If it fails, check the run logs for details on data quality issues or parsing er
                     df: pd.DataFrame
                     if config.parser_function:
                         # For custom parsers, the file_to_parse is what we have.
-                        resolved_path_for_feedback = file_to_parse
                         if config.parser_function not in ALLOWED_CUSTOM_PARSERS:
                             raise ValueError(f"Custom parser function '{config.parser_function}' is not whitelisted.")
                         context.log.info(f"Using custom parser function '{config.parser_function}' for file: {file_to_parse}")
-                        if config.parser_function == "generic_selenium_scraper":
-                            custom_parser_func = custom_parsers.generic_selenium_scraper
-                        else:
-                            custom_parser_func = getattr(custom_parsers, config.parser_function)
+                        custom_parser_func = getattr(custom_parsers, config.parser_function)
                         # SECURITY: Add an extra check to ensure the retrieved attribute is actually a function.
                         if not callable(custom_parser_func):
                             raise TypeError(f"The specified parser '{config.parser_function}' is not a callable function.")
 
                         # Differentiate between file-based parsers and config-based scrapers
-                        if config.parser_function in INGESTION_FUNCTIONS:
+                        if config.parser_function in ["generic_web_scraper", "generic_selenium_scraper"]:
                             if not config.scraper_config:
                                 raise ValueError(f"'{config.parser_function}' requires a non-null 'scraper_config' in the database.")
-                            
-                            # Inject import_name into the config JSON so the scraper can access it
-                            try:
-                                scraper_conf_dict = json.loads(config.scraper_config)
-                                scraper_conf_dict['import_name'] = config.import_name
-                                config_json_with_context = json.dumps(scraper_conf_dict)
-                            except Exception as e:
-                                context.log.warning(f"Failed to inject import_name into scraper config: {e}")
-                                config_json_with_context = config.scraper_config
-
                             # Scrapers can return one DataFrame or a dict of them
-                            scraped_result = custom_parser_func(config_json_with_context)
+                            scraped_result = custom_parser_func(config.scraper_config)
                             if isinstance(scraped_result, dict):
                                 # If it's a dict, find the DataFrame for the current asset's import_name
                                 df = scraped_result.get(config.import_name)
@@ -443,7 +409,6 @@ If it fails, check the run logs for details on data quality issues or parsing er
                             df = custom_parser_func(file_to_parse)
                     else:
                         # For factory parsers, the file_to_parse is what we have.
-                        resolved_path_for_feedback = file_to_parse
                         parser = parsers.parser_factory.get_parser(config.file_type)
                         context.log.info(f"Using '{config.file_type}' parser from factory for file: {file_to_parse}")
                         df = parser.parse(file_to_parse)
@@ -593,21 +558,11 @@ def create_transform_asset(config: PipelineConfig):
     transform_procedure = config.transform_procedure
     pipeline_group_name = pipeline_name.strip().lower()
 
-    # Define which parsers are considered "Ingestion" to resolve the upstream dependency name
-    INGESTION_FUNCTIONS = {
-        "generic_web_scraper",
-        "generic_selenium_scraper",
-        "generic_sftp_downloader"
-    }
-    is_ingestion = config.parser_function in INGESTION_FUNCTIONS
-
     # Sanitize the asset name to be valid in Dagster.
     sanitized_transform_name = sanitize_name(f"{import_name}_transform")
 
     # Define dependencies on the specific extract asset
-    # We must match the name generated in create_extract_and_load_asset
-    upstream_suffix = "_ingest" if is_ingestion else "_extract_and_load_staging"
-    deps = [AssetKey(sanitize_name(f"{import_name}{upstream_suffix}"))]
+    deps = [AssetKey(sanitize_name(f"{import_name}_extract_and_load_staging"))]
 
     # --- NEW: Support for explicit dependencies via scraper_config ---
     # This allows users to chain imports (e.g., ensure 'replace' runs before 'append')
