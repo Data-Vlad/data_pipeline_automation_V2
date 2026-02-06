@@ -63,49 +63,8 @@ def _show_toast_notification(status: str, pipeline_name: str, import_name: str, 
         source_file (str): The basename of the file that was processed.
         message (str): A user-friendly message about the outcome.
     """
-    if os.name != 'nt':
-        return  # Only run on Windows
- 
-    import subprocess
-
-    try:
-        title = f"File Processed: {import_name.replace('stg_', '')}"
-        body = f"Status: {status.capitalize()}"
-        
-        icon = "imageres.dll,-101" # Default (Failure/Warning)
-        if status.upper() == 'SUCCESS':
-            icon = "imageres.dll,-119"
-        elif status.upper() == 'STARTED':
-            icon = "imageres.dll,-1004" # Generic Info/Run icon
-
-        # The `run_elt_service.bat` script ensures the BurntToast module is installed.
-        # We can directly call it without checking for its existence here.
-        # This is faster and removes redundant logic.
-        ps_title = title.replace("'", "''")
-        ps_body = body.replace("'", "''")
-        powershell_command = f"""
-        Import-Module BurntToast;
-        New-BurntToastNotification -AppLogo '{icon}' -Text '{ps_title}', '{ps_body}'
-        """
- 
-        # Configure startup info to hide the console window
-        startupinfo = subprocess.STARTUPINFO()
-        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        startupinfo.wShowWindow = 0 # SW_HIDE
-
-        # Execute the PowerShell command.
-        process = subprocess.run(
-            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", powershell_command],
-            capture_output=True, text=True, startupinfo=startupinfo
-        )
- 
-        if process.returncode != 0:
-            print(f"Warning: Failed to show PowerShell toast notification. Error: {process.stderr.strip()}")
-
-    except Exception as e:
-        # Use traceback to get detailed error information for logging
-        detailed_error = traceback.format_exc()
-        print(f"Warning: An unexpected error occurred in _show_toast_notification. Error: {e}\n{detailed_error}")
+    # Toast notifications disabled as BurntToast module is not available.
+    pass
 
 def _write_user_feedback_log(monitored_directory: Optional[str], pipeline_name: str, import_name: str, status: str, source_file: str, message: str):
     """
@@ -558,6 +517,11 @@ def create_transform_asset(config: PipelineConfig):
     transform_procedure = config.transform_procedure
     pipeline_group_name = pipeline_name.strip().lower()
 
+    # Handle multiple destination tables (comma-separated).
+    # The first one is treated as the "primary" for locking, smart replace checks, and deduplication.
+    all_dest_tables = [t.strip() for t in config.destination_table.split(',')]
+    primary_dest_table = all_dest_tables[0]
+
     # Sanitize the asset name to be valid in Dagster.
     sanitized_transform_name = sanitize_name(f"{import_name}_transform")
 
@@ -644,8 +608,10 @@ This asset moves data from staging to the final, production-ready table.
         # We use a dedicated connection for the lock that stays open for the duration of the asset.
         lock_conn = engine.connect()
         lock_resource = f"lock_{config.destination_table.lower()}"
+        lock_resource = f"lock_{primary_dest_table.lower()}"
         try:
             context.log.info(f"Acquiring serialization lock for table '{config.destination_table}'...")
+            context.log.info(f"Acquiring serialization lock for table '{primary_dest_table}'...")
             # LockTimeout = -1 means wait indefinitely until the lock is available.
             lock_stmt = text("DECLARE @res INT; EXEC @res = sp_getapplock @Resource = :res, @LockMode = 'Exclusive', @LockOwner = 'Session', @LockTimeout = -1; SELECT @res;")
             lock_result = lock_conn.execute(lock_stmt, {"res": lock_resource}).scalar()
@@ -759,6 +725,7 @@ This asset moves data from staging to the final, production-ready table.
                     # a shared lock to read the absolute latest committed data.
                     with engine.connect() as check_conn:
                         check_time_stmt = text(f"SELECT MAX(load_timestamp), GETUTCDATE() FROM {config.destination_table} WITH (READCOMMITTEDLOCK)")
+                        check_time_stmt = text(f"SELECT MAX(load_timestamp), GETUTCDATE() FROM {primary_dest_table} WITH (READCOMMITTEDLOCK)")
                         time_check_row = check_conn.execute(check_time_stmt).fetchone()
                     
                     if time_check_row and time_check_row[0]:
@@ -777,8 +744,10 @@ This asset moves data from staging to the final, production-ready table.
                 except Exception as e:
                     context.log.debug(f"Smart Replace check skipped (Table might not have load_timestamp): {e}")
                     context.log.warning(f"Smart Replace skipped. Destination table '{config.destination_table}' might be missing 'load_timestamp' column. Defaulting to TRUNCATE. Error: {e}")
+                    context.log.warning(f"Smart Replace skipped. Destination table '{primary_dest_table}' might be missing 'load_timestamp' column. Defaulting to TRUNCATE. Error: {e}")
                     if "Invalid column name" in str(e) or "Invalid object name" in str(e):
                         context.log.warning(f"Smart Replace SKIPPED: Destination table '{config.destination_table}' is missing 'load_timestamp' column or table does not exist. Defaulting to TRUNCATE.")
+                        context.log.warning(f"Smart Replace SKIPPED: Destination table '{primary_dest_table}' is missing 'load_timestamp' column or table does not exist. Defaulting to TRUNCATE.")
                     else:
                         context.log.debug(f"Smart Replace check skipped (Table might not have load_timestamp): {e}")
                         context.log.warning(f"Smart Replace skipped. Error: {e}")
@@ -816,6 +785,7 @@ This asset moves data from staging to the final, production-ready table.
                                 DELETE s
                                 FROM {current_staging_table} s
                                 JOIN {config.destination_table} d ON {join_conditions}
+                                JOIN {primary_dest_table} d ON {join_conditions}
                                 WHERE s.dagster_run_id = :run_id
                             """)
                             
@@ -1150,6 +1120,13 @@ def create_ddl_generation_utility_asset(config: PipelineConfig):
         dest_cols.append("    [load_timestamp] DATETIME DEFAULT GETUTCDATE()") # Add a load timestamp
 
         dest_ddl = f"CREATE TABLE {config.destination_table} (\n" + ",\n".join(dest_cols) + "\n);"
+        # Handle multiple destination tables
+        dest_tables = [t.strip() for t in config.destination_table.split(',')]
+        dest_ddl_parts = []
+        for dt in dest_tables:
+            dest_ddl_parts.append(f"CREATE TABLE {dt} (\n" + ",\n".join(dest_cols) + "\n);")
+        
+        dest_ddl = "\n\n".join(dest_ddl_parts)
         
         shared_columns = [f"    [{col_name}]" for col_name in df_sample.columns]
         shared_columns_str = ",\n".join(shared_columns)
@@ -1168,6 +1145,7 @@ BEGIN
     IF EXISTS (SELECT 1 FROM {config.staging_table} WHERE dagster_run_id = @run_id)
     BEGIN
         INSERT INTO {config.destination_table} ({shared_columns_str.replace("    ", "")}) SELECT {shared_columns_str.replace("    ", "")} FROM {config.staging_table} WHERE dagster_run_id = @run_id;
+        INSERT INTO {dest_tables[0]} ({shared_columns_str.replace("    ", "")}) SELECT {shared_columns_str.replace("    ", "")} FROM {config.staging_table} WHERE dagster_run_id = @run_id;
     END;
 END;"""
         
