@@ -663,7 +663,6 @@ This asset moves data from staging to the final, production-ready table.
                         ).mappings().one_or_none()
 
                     if result:
-                        current_load_method = result['load_method']
                         current_load_method = result['load_method'].strip() if result['load_method'] else 'append'
                         current_is_active = bool(result['is_active'])
                         if result['staging_table']:
