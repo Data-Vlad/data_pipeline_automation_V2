@@ -282,9 +282,10 @@ If it fails, check the run logs for details on data quality issues or parsing er
                 # If source_file_path is not provided (e.g., manual run), construct the full path.
                 # SECURITY: Sanitize the file_pattern to prevent path traversal attacks.
                 # We only want the filename, not any directory info that might be in the pattern.
-                if config.file_pattern:
-                    config.file_pattern = os.path.basename(config.file_pattern)
-                file_to_parse = os.path.join(config.monitored_directory, config.file_pattern) if config.monitored_directory else config.file_pattern
+                pattern_to_use = config.file_pattern
+                if pattern_to_use:
+                    pattern_to_use = os.path.basename(pattern_to_use)
+                file_to_parse = os.path.join(config.monitored_directory, pattern_to_use) if config.monitored_directory else pattern_to_use
             if not file_to_parse:
                 raise ValueError("No source file path provided or configured for extraction.")
 
@@ -607,7 +608,6 @@ This asset moves data from staging to the final, production-ready table.
         # This prevents parallel runs (e.g. Replace vs Append) from overwriting each other.
         # We use a dedicated connection for the lock that stays open for the duration of the asset.
         lock_conn = engine.connect()
-        lock_resource = f"lock_{config.destination_table.lower()}"
         lock_resource = f"lock_{primary_dest_table.lower()}"
         try:
             context.log.info(f"Acquiring serialization lock for table '{config.destination_table}'...")
@@ -724,7 +724,6 @@ This asset moves data from staging to the final, production-ready table.
                     # The table hint forces SQL Server to ignore Snapshot Isolation (RCSI) and acquire 
                     # a shared lock to read the absolute latest committed data.
                     with engine.connect() as check_conn:
-                        check_time_stmt = text(f"SELECT MAX(load_timestamp), GETUTCDATE() FROM {config.destination_table} WITH (READCOMMITTEDLOCK)")
                         check_time_stmt = text(f"SELECT MAX(load_timestamp), GETUTCDATE() FROM {primary_dest_table} WITH (READCOMMITTEDLOCK)")
                         time_check_row = check_conn.execute(check_time_stmt).fetchone()
                     
