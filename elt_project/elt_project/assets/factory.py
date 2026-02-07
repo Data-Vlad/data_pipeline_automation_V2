@@ -226,6 +226,7 @@ If it fails, check the run logs for details on data quality issues or parsing er
         engine = get_dynamic_engine(db_resource)
         source_file_path = context.op_config.get("source_file_path")
         resolved_path_for_feedback = source_file_path # Initialize for feedback logging
+        csv_path = None # Initialize for cleanup
         
         # --- Runtime Config Fetch ---
         # Fetch the latest staging table name to handle config updates without full restart
@@ -532,6 +533,14 @@ If it fails, check the run logs for details on data quality issues or parsing er
             log_details["end_time"] = datetime.utcnow()
             # Write to the database log for long-term storage.
             _log_asset_run(engine, log_details)
+
+            # Cleanup temporary converted CSV if it exists
+            if csv_path and os.path.exists(csv_path):
+                try:
+                    os.remove(csv_path)
+                    context.log.info(f"Cleaned up temporary CSV file: {csv_path}")
+                except Exception as e:
+                    context.log.warning(f"Failed to delete temporary CSV file '{csv_path}': {e}")
         return df
 
     return extract_and_load_staging
