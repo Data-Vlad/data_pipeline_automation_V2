@@ -329,8 +329,7 @@ If it fails, check the run logs for details on data quality issues or parsing er
             
             resolved_path_for_feedback = file_to_parse
 
-            # --- NEW: Determine processing type (allows for overrides like Excel->CSV conversion) ---
-            processing_file_type = config.file_type.lower()
+            # --- NEW: Determine processing type (allows for overrides like Excel->CSV conversion) --            processing_file_type = config.file_type.lower()
 
             # --- WORKAROUND: Auto-convert Excel to CSV for memory efficiency ---
             # If the user configured 'excel' but we want to use the chunked CSV loader.
