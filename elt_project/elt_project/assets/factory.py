@@ -228,6 +228,7 @@ If it fails, check the run logs for details on data quality issues or parsing er
         source_file_path = context.op_config.get("source_file_path")
         resolved_path_for_feedback = source_file_path # Initialize for feedback logging
         csv_path = None # Initialize for cleanup
+        file_to_parse = "N/A" # Initialize to prevent UnboundLocalError in finally/except blocks
         
         # --- Runtime Config Fetch ---
         # Fetch the latest staging table name to handle config updates without full restart
@@ -484,9 +485,15 @@ If it fails, check the run logs for details on data quality issues or parsing er
             log_details["message"] = f"Successfully processed and loaded {log_details['rows_processed']} rows into {current_staging_table}."
 
         except Exception as e:
-            # --- Smart Error Handling for Column Mismatches ---
-            # Check if the error is the specific one we want to handle
-            if "Invalid column name" in str(e) or ("ProgrammingError" in str(type(e)) and "42S22" in str(e)):
+            # --- Smart Error Handling ---
+            error_msg = str(e)
+
+            # Check for missing dependencies (specifically openpyxl for Excel)
+            if "openpyxl" in error_msg and "dependency" in error_msg:
+                log_details["resolution_steps"] = "The 'openpyxl' library is required to process Excel files. Please install it by running: pip install openpyxl"
+                log_details["error_details"] = error_msg
+            # Check for Column Mismatches
+            elif "Invalid column name" in error_msg or ("ProgrammingError" in str(type(e)) and "42S22" in error_msg):
                 try:
                     # Introspect the database to get the actual table columns
                     from sqlalchemy import inspect
@@ -508,7 +515,7 @@ If it fails, check the run logs for details on data quality issues or parsing er
                 # SECURITY: Avoid logging full stack traces to the database to prevent information disclosure.
                 # The full trace is still available in the Dagster UI/console for developers.
                 log_details["error_details"] = f"An unexpected error of type {type(e).__name__} occurred."
-            log_details["resolution_steps"] = f"Review Dagster logs and stack trace for '{config.import_name}_extract_and_load_staging'. Check source file format, path ('{file_to_parse}'), and custom parser logic if applicable. Ensure staging table schema matches parsed data."
+                log_details["resolution_steps"] = f"Review Dagster logs and stack trace for '{config.import_name}_extract_and_load_staging'. Check source file format, path ('{file_to_parse}'), and custom parser logic if applicable. Ensure staging table schema matches parsed data."
             log_details["message"] = str(e)
             context.log.error(f"Error during extraction for {config.import_name}: {e}")
             
