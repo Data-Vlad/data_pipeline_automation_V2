@@ -361,6 +361,9 @@ If it fails, check the run logs for details on data quality issues or parsing er
                     processing_file_type = 'csv'
                     
                 except Exception as e:
+                    # If the error is missing dependency, fail immediately instead of falling back
+                    if "openpyxl" in str(e) and "dependency" in str(e):
+                        raise e
                     context.log.warning(f"Excel-to-CSV conversion failed: {e}. Falling back to standard Excel parsing.")
 
             # OPTIMIZATION: Use chunked loading for standard CSVs to save memory
