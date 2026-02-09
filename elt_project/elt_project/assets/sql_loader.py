@@ -5,6 +5,7 @@ from sqlalchemy import text
 from sqlalchemy import inspect
 from sqlalchemy.engine import Engine
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
+import openpyxl
 
 def load_df_to_sql(df: pd.DataFrame, table_name: str, engine: Engine):
     """
@@ -28,8 +29,28 @@ def load_df_to_sql(df: pd.DataFrame, table_name: str, engine: Engine):
                 transaction.rollback()
                 raise e
 
-def _upload_chunk_worker(chunk, table_name, engine):
-    """Helper function to upload a single chunk in a separate thread."""
+def _process_and_upload_chunk(chunk, table_name, engine, run_id, column_mapping, db_cols):
+    """
+    Helper function to process and upload a single chunk in a separate thread.
+    Performs column mapping, filtering, and boolean fixing before upload.
+    """
+    # Apply column mapping
+    if column_mapping:
+        chunk = chunk.rename(columns=column_mapping)
+
+    chunk['dagster_run_id'] = run_id
+
+    # Filter and normalize columns to match DB schema
+    valid_chunk_cols = [c for c in chunk.columns if c.lower() in db_cols]
+    chunk = chunk[valid_chunk_cols]
+    rename_map = {c: db_cols[c.lower()] for c in valid_chunk_cols}
+    chunk = chunk.rename(columns=rename_map)
+
+    # Find boolean-like columns and fill NaNs with 0 (False)
+    bool_cols = [col for col in chunk.columns if 'checkbox' in col.lower() or 'canbecompleted' in col.lower()]
+    if bool_cols:
+        chunk.loc[:, bool_cols] = chunk[bool_cols].fillna(0)
+
     with engine.connect() as connection:
         # Use chunksize within to_sql to ensure stable insertion batches inside the thread
         chunk.to_sql(name=table_name, con=connection, if_exists='append', index=False, chunksize=1000)
@@ -74,25 +95,8 @@ def load_csv_to_sql_chunked(
                 futures = []
                 
                 for chunk in reader:
-                    # Apply column mapping to each chunk
-                    if column_mapping:
-                        chunk = chunk.rename(columns=column_mapping)
-
-                    chunk['dagster_run_id'] = run_id
-
-                    # Filter and normalize columns to match DB schema
-                    valid_chunk_cols = [c for c in chunk.columns if c.lower() in db_cols]
-                    chunk = chunk[valid_chunk_cols]
-                    rename_map = {c: db_cols[c.lower()] for c in valid_chunk_cols}
-                    chunk = chunk.rename(columns=rename_map)
-
-                    # Find boolean-like columns and fill NaNs with 0 (False)
-                    bool_cols = [col for col in chunk.columns if 'checkbox' in col.lower() or 'canbecompleted' in col.lower()]
-                    if bool_cols:
-                        chunk.loc[:, bool_cols] = chunk[bool_cols].fillna(0)
-
-                    # Submit upload task to background thread
-                    future = executor.submit(_upload_chunk_worker, chunk, table_name, engine)
+                    # Submit raw chunk to background thread for processing and upload
+                    future = executor.submit(_process_and_upload_chunk, chunk, table_name, engine, run_id, column_mapping, db_cols)
                     futures.append(future)
 
                     # Backpressure: If we have 4 active uploads, wait for at least one to finish
@@ -116,6 +120,82 @@ def load_csv_to_sql_chunked(
     except Exception as e:
         raise e
 
+def load_excel_to_sql_streamed(
+    file_path: str,
+    table_name: str,
+    engine: Engine,
+    run_id: str,
+    column_mapping: dict = None,
+    chunksize: int = 10000,
+    logger=None,
+):
+    """
+    Streams an Excel file directly to SQL using openpyxl and multi-threaded uploading.
+    Avoids intermediate CSV generation for speed and storage efficiency.
+    """
+    # Get target table columns
+    inspector = inspect(engine)
+    db_cols = {col['name'].lower(): col['name'] for col in inspector.get_columns(table_name)}
+    
+    total_rows = 0
+    
+    # Use openpyxl in read-only mode for memory efficiency
+    wb = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
+    try:
+        sheet = wb.active
+        rows = sheet.values
+        
+        try:
+            headers = next(rows)
+        except StopIteration:
+            return 0 # Empty file
+            
+        # Handle None headers or non-string headers
+        headers = [str(h) if h is not None else f"col_{i}" for i, h in enumerate(headers)]
+        
+        chunk_data = []
+        
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            futures = []
+            
+            for row in rows:
+                chunk_data.append(row)
+                
+                if len(chunk_data) >= chunksize:
+                    # Create DataFrame from accumulated rows
+                    df_chunk = pd.DataFrame(chunk_data, columns=headers)
+                    chunk_data = [] # Reset buffer
+                    
+                    # Submit to background thread
+                    future = executor.submit(_process_and_upload_chunk, df_chunk, table_name, engine, run_id, column_mapping, db_cols)
+                    futures.append(future)
+                    
+                    # Backpressure
+                    if len(futures) >= 4:
+                        done, not_done = wait(futures, return_when=FIRST_COMPLETED)
+                        futures = list(not_done)
+                        for f in done:
+                            count = f.result()
+                            total_rows += count
+                            if logger: logger.info(f"Loaded batch of {count} rows. Total loaded: {total_rows}")
+                        gc.collect()
+            
+            # Process remaining rows
+            if chunk_data:
+                df_chunk = pd.DataFrame(chunk_data, columns=headers)
+                future = executor.submit(_process_and_upload_chunk, df_chunk, table_name, engine, run_id, column_mapping, db_cols)
+                futures.append(future)
+                
+            for f in futures:
+                count = f.result()
+                total_rows += count
+                if logger: logger.info(f"Loaded batch of {count} rows. Total loaded: {total_rows}")
+                
+    finally:
+        wb.close()
+        gc.collect()
+        
+    return total_rows
 
 def execute_stored_procedure(
     procedure_name: str,
