@@ -106,8 +106,15 @@ call :log INFO "Step 3/6: Setting up Python environment..."
 :: Attempt to pull updates.
 git pull >"%TEMP%\git_update.log" 2>&1
 if %errorlevel% neq 0 (
-    call :log INFO "Could not check for updates via Git. Using local version."
-    call :log INFO "Git error details logged to: %TEMP%\git_update.log"
+    findstr /I /C:"unrelated histories" "%TEMP%\git_update.log" >nul
+    if not errorlevel 1 (
+        call :log INFO "Detected unrelated histories. Attempting to merge..."
+        git pull --allow-unrelated-histories --no-edit
+    ) else (
+        call :log INFO "Could not check for updates via Git. Using local version."
+        call :log INFO "Git error details:"
+        type "%TEMP%\git_update.log"
+    )
 )
 
 :: ----------------------------------------------------------------------------
