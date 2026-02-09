@@ -1,6 +1,7 @@
 import os
 import argparse
 import sys
+import time
 import threading
 import logging
 from collections import defaultdict
@@ -32,11 +33,26 @@ os.environ['DAGSTER_HOME'] = dagster_home_path
 # --- Logging Configuration ---
 # Configure a logger to provide detailed error messages with tracebacks.
 # This will replace all `print(..., file=sys.stderr)` calls for errors.
+class ApiOrErrorFilter(logging.Filter):
+    def filter(self, record):
+        return record.levelno >= logging.ERROR or "API" in record.getMessage()
+
+log_file_path = os.path.join(os.path.dirname(__file__), 'simple_ui.log')
+file_handler = logging.FileHandler(log_file_path, mode='w')
+stream_handler = logging.StreamHandler(sys.stdout)
+
+api_filter = ApiOrErrorFilter()
+file_handler.addFilter(api_filter)
+stream_handler.addFilter(api_filter)
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)-8s - %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
-    # The launcher script will redirect stdout/stderr to a log file.
+    handlers=[
+        file_handler,
+        stream_handler
+    ]
 )
 logger = logging.getLogger(__name__)
 
@@ -74,11 +90,7 @@ def _initialize_app_thread():
     Updates the global APP_STATE with the result.
     """
     try:
-        logger.info("=" * 60)
-        logger.info("--- Application Initialization Started ---")
-
         # --- Step 1: Retrieve Database Credentials ---
-        logger.info("INIT(1/3): Retrieving database credentials from environment...")
         # These are set by the launcher script. Using a 'DAGSTER_' prefix is a good convention.
         username = os.getenv("DAGSTER_DB_USERNAME", "").strip()
         password = os.getenv("DAGSTER_DB_PASSWORD", "").strip()
@@ -91,27 +103,20 @@ def _initialize_app_thread():
             raise ValueError(
                 f"Database password for target '{cli_args.credential_target}' could not be retrieved."
             )
-        logger.info("INIT(1/3): Successfully retrieved database credentials.")
 
         # --- Step 2: Test Database Connection ---
-        logger.info("INIT(2/3): Testing database connection...")
         _test_db_connection(username, password)
-        logger.info("INIT(2/3): Database connection test successful.")
 
         # --- Step 3: Verify Dagster Workspace ---
-        logger.info("[3/3] Verifying Dagster workspace configuration...")
         workspace_file_path = os.path.join(dagster_home_path, "workspace.yaml")
         if not os.path.exists(workspace_file_path):
             raise FileNotFoundError(
                 f"Dagster workspace file not found at '{workspace_file_path}'. "
             )
-        logger.info("[3/3] Dagster workspace file found.")
 
         # --- Success! Mark app as ready. ---
         with APP_STATE.lock:
             APP_STATE.initialization_status = "SUCCESS"
-        logger.info("--- Application Initialization Succeeded ---")
-        logger.info("=" * 60)
 
     except Exception as e:
         # --- Failure: Update global state with error info ---
@@ -133,7 +138,6 @@ def _initialize_app_thread():
 
 def _test_db_connection(username, password):
     """Create a temporary engine to test the DB connection, then discard it."""
-    logger.info("DB      : Creating temporary engine to test connection...")
     db_driver_raw = os.getenv("DB_DRIVER", "ODBC Driver 17 for SQL Server")
     driver = db_driver_raw.strip('"').strip('{}').replace(' ', '+')
     conn_string = (
@@ -144,7 +148,7 @@ def _test_db_connection(username, password):
     temp_engine = create_engine(conn_string, poolclass=NullPool, connect_args={"timeout": 10})
     try:
         with temp_engine.connect():
-            logger.info("DB      : Connection test successful.")
+            pass
     except Exception as e:
         # This provides a highly specific error message if the connection itself fails.
         logger.error(
@@ -169,7 +173,6 @@ def _get_db_engine():
     # ensuring it is created in the correct thread context for the web server.
     with APP_STATE.lock:
         if APP_STATE.db_engine is None:
-            logger.info("DB      : Initializing persistent, thread-safe database engine...")
             password = os.getenv("DAGSTER_DB_PASSWORD", "").strip()
             username = os.getenv("DAGSTER_DB_USERNAME", "").strip()
             db_driver_raw = os.getenv("DB_DRIVER", "ODBC Driver 17 for SQL Server")
@@ -181,7 +184,6 @@ def _get_db_engine():
             # pool_pre_ping checks connection validity; connect_args prevents hangs on new connections.
             # A 10-second timeout is a reasonable default.
             APP_STATE.db_engine = create_engine(conn_string, pool_pre_ping=True, connect_args={"timeout": 10})
-            logger.info("DB      : Database engine initialized successfully.")
     return APP_STATE.db_engine
 
 
@@ -189,7 +191,6 @@ def _recreate_db_engine():
     """Disposes of the old engine and creates a new one."""
     with APP_STATE.lock:
         if APP_STATE.db_engine:
-            logger.warning("DB      : Disposing of existing database engine to force reconnection.")
             APP_STATE.db_engine.dispose()
         APP_STATE.db_engine = None  # Force re-initialization on next call
     return _get_db_engine()
@@ -224,7 +225,6 @@ def check_initialization():
     This middleware protects all endpoints from being accessed before the app is ready.
     """
     # Allow access to status/shutdown endpoints regardless of state
-    logger.info(f"--> {request.method} {request.path}")
     if request.path in ["/status", "/api/status", "/api/shutdown"]:
         return
 
@@ -238,7 +238,6 @@ def check_initialization():
 @app.after_request
 def log_response(response):
     """Log the status code of the response for each request."""
-    logger.info(f"<-- {request.method} {request.path} - {response.status}")
     return response
 
 
@@ -261,9 +260,6 @@ def index():
     """Renders the main UI page."""
     # The before_request handler ensures this only runs after successful initialization.
     response = make_response(render_template("index.html"))
-    response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
-    response.headers["Pragma"] = "no-cache"
-    response.headers["Expires"] = "0"
     return response
 
 @app.route("/favicon.ico")
@@ -280,7 +276,6 @@ def get_pipelines():
     API endpoint to fetch all active pipelines and their associated imports from the database.
     This data is used to populate the main checklist on the UI.
     """
-    logger.info("API     : Fetching pipeline configurations from database...")
     pipelines = []
     # Use a defaultdict to easily group imports under their parent pipeline.
     pipeline_groups = defaultdict(lambda: {"imports": [], "monitored_directory": None})
@@ -308,15 +303,10 @@ def get_pipelines():
             # Convert the grouped data into a list format for the JSON response.
             for pipeline_name, data in pipeline_groups.items():
                 pipelines.append({"pipeline_name": pipeline_name, **data})
-            logger.info(f"API     : Successfully fetched and processed {len(pipelines)} pipelines.")
             return jsonify(pipelines)
 
         except Exception as e:
-            logger.warning(
-                f"API     : Attempt {attempt + 1} failed to fetch pipelines.", exc_info=True
-            )
             if attempt == 0:  # If this was the first attempt
-                logger.info("API     : Recreating database engine and retrying...")
                 _recreate_db_engine()
                 # The loop will now continue to the second attempt
             else:  # If this was the second attempt
@@ -329,6 +319,61 @@ def get_pipelines():
     # This line should not be reachable, but is here as a fallback.
     return jsonify({"error": "An unexpected error occurred in get_pipelines."}), 500
 
+def _monitor_run_status(run_id, job_name):
+    """
+    Background thread to poll for run status and log it to simple_ui.log.
+    This gives the user visibility into the execution phase.
+    """
+    try:
+        # Create a fresh instance for this thread
+        instance = DagsterInstance.get()
+        last_status = None
+        logs_seen_count = 0
+        
+        # Poll for up to 2 hours
+        for _ in range(7200): 
+            run = instance.get_run_by_id(run_id)
+            if not run:
+                break
+            
+            # --- Status Updates ---
+            current_status = run.status
+            if current_status != last_status:
+                logger.info(f"API     : Run '{run_id}' ({job_name}) status changed to: {current_status.value}")
+                last_status = current_status
+            
+            # --- Log Updates ---
+            # Fetch logs to show progress (Asset materializations, errors, user logs)
+            try:
+                all_logs = instance.all_logs(run_id)
+                if len(all_logs) > logs_seen_count:
+                    new_logs = all_logs[logs_seen_count:]
+                    logs_seen_count = len(all_logs)
+                    
+                    for record in new_logs:
+                        # Ensure the message passes the "API" filter in simple_ui.py
+                        prefix = f"API     : [{job_name}]"
+                        if hasattr(record, 'step_key') and record.step_key:
+                            prefix += f"[{record.step_key}]"
+                        
+                        clean_msg = record.message.replace('\n', ' ') if record.message else ""
+                        
+                        if hasattr(record, 'level') and record.level >= logging.ERROR:
+                            logger.error(f"{prefix} {clean_msg}")
+                        else:
+                            logger.info(f"{prefix} {clean_msg}")
+            except Exception as log_e:
+                # Don't crash the monitor thread if log fetching fails
+                logger.warning(f"API     : Failed to fetch logs for run '{run_id}': {log_e}")
+
+            if run.is_finished:
+                logger.info(f"API     : Run '{run_id}' ({job_name}) finished with final status: {current_status.value}")
+                break
+                
+            time.sleep(2)
+    except Exception as e:
+        logger.error(f"API     : Error monitoring run '{run_id}': {e}")
+
 @app.route("/api/run_imports", methods=["POST"])
 def run_imports():
     """
@@ -338,11 +383,11 @@ def run_imports():
         data = request.json
         selected_imports = data.get("imports", [])
         if not selected_imports:
-            logger.warning("API     : 'run_imports' called with no imports selected.")
             return jsonify({"error": "No imports selected"}), 400
 
         logger.info(f"API     : Received request to run {len(selected_imports)} imports: {[item['import_name'] for item in selected_imports]}")
 
+        logger.info("API     : Loading Dagster workspace context...")
         workspace_file_path = os.path.join(dagster_home_path, "workspace.yaml")
         instance = DagsterInstance.get()
         with WorkspaceProcessContext(
@@ -352,6 +397,7 @@ def run_imports():
             instance=instance,
             workspace_load_target=WorkspaceFileTarget(paths=[workspace_file_path]),
         ) as process_context:
+            logger.info("API     : Workspace context loaded successfully.")
             request_context = process_context.create_request_context()
             location_name = "elt_project"
             code_location = request_context.get_code_location(location_name)
@@ -362,6 +408,7 @@ def run_imports():
                 logger.error(f"API     : {error_msg} [RESOLUTION] Check 'dagster_home/workspace.yaml' for a correct 'module_name' and ensure 'definitions.py' exists. Run 'dagster dev' to debug code loading.")
                 raise RuntimeError(error_msg)
 
+            logger.info(f"API     : Found code location '{location_name}'.")
             repositories = code_location.get_repositories()
             if not repositories:
                 raise RuntimeError(f"No repositories found in code location '{location_name}'. Check your definitions file.")
@@ -375,7 +422,7 @@ def run_imports():
             for item in selected_imports:
                 import_name = item["import_name"]
                 sensor_name = f"sensor_{import_name}"
-                logger.info(f"API     :  - Submitting tick for sensor '{sensor_name}'...")
+                logger.info(f"API     : Processing import '{import_name}' (Sensor: '{sensor_name}')...")
 
                 # Default result object for this import
                 import_result = {
@@ -392,6 +439,7 @@ def run_imports():
                     external_sensor = external_repo.get_sensor(sensor_name)
 
                     # 1. Tick the sensor to get RunRequests (this does not launch them automatically)
+                    logger.info(f"API     :  - Ticking sensor '{sensor_name}'...")
                     tick_result = code_location.get_sensor_execution_data(
                         instance=instance,
                         repository_handle=external_repo.handle,
@@ -404,13 +452,39 @@ def run_imports():
                     )
                     
                     # 2. Process the results and launch the actual runs
-                    if not tick_result.run_requests:
-                        logger.info(f"API     :  - Sensor '{sensor_name}' ticked but produced no run requests (conditions not met).")
-                        import_result["error"] = "Conditions not met (no new files?)"
-                        results.append(import_result)
-                        continue
+                    run_requests = tick_result.run_requests
+                    logger.info(f"API     :  - Sensor tick complete. Generated {len(run_requests) if run_requests else 0} run requests.")
 
-                    for run_req in tick_result.run_requests:
+                    # --- FORCE RUN LOGIC ---
+                    # If the sensor found no "new" files (e.g. timestamp hasn't changed),
+                    # but the user explicitly requested a run via the UI, we FORCE it.
+                    if not run_requests:
+                        logger.info(f"API     :  - Sensor '{sensor_name}' produced no requests. Attempting FORCE RUN.")
+                        
+                        # Try to resolve the job name from the sensor's targets
+                        job_name = None
+                        if external_sensor.targets:
+                            job_name = external_sensor.targets[0].job_name
+                        
+                        if job_name:
+                            logger.info(f"API     :  - Force launching job '{job_name}' with default config.")
+                            # Create a synthetic run request to force the job to run.
+                            # We pass an empty run_config. The Asset logic in factory.py is designed
+                            # to handle this by looking up the latest file in the directory.
+                            class ForceRunRequest:
+                                def __init__(self, job_name):
+                                    self.job_name = job_name
+                                    self.run_config = {}
+                                    self.tags = {"dagster/run_reason": "manual_force_run"}
+                                    self.run_key = None
+                            
+                            run_requests = [ForceRunRequest(job_name)]
+                        else:
+                            import_result["error"] = "No new data & could not resolve job."
+                            results.append(import_result)
+                            continue
+
+                    for run_req in run_requests:
                         # Resolve the job name (sensor might target a specific job or be dynamic)
                         job_name = run_req.job_name
                         if not job_name:
@@ -419,7 +493,6 @@ def run_imports():
                                 job_name = targets[0].job_name
                         
                         if not job_name:
-                            logger.warning(f"API     :  - Skipping request from '{sensor_name}': Could not resolve target job name.")
                             continue
 
                         # Create and submit the run
@@ -430,9 +503,11 @@ def run_imports():
                         if run_req.run_key:
                             run_tags["dagster/run_key"] = run_req.run_key
 
+                        logger.info(f"API     :  - Preparing to launch job '{job_name}'...")
                         logger.info(f"API     :  - Run Config: {run_req.run_config}")
 
                         # Generate Execution Plan
+                        logger.info(f"API     :  - Generating execution plan for job '{job_name}'...")
                         execution_plan = code_location.get_execution_plan(
                             remote_job=external_job,
                             run_config=run_req.run_config or {},
@@ -443,6 +518,7 @@ def run_imports():
 
                         run_id = make_new_run_id()
 
+                        logger.info(f"API     :  - Creating run '{run_id}'...")
                         run = instance.create_run(
                             job_name=job_name,
                             run_id=run_id,
@@ -463,8 +539,13 @@ def run_imports():
                             asset_check_selection=None,
                             asset_graph=None
                         )
+                        logger.info(f"API     :  - Launching run '{run_id}'...")
                         instance.launch_run(run.run_id, workspace=request_context)
                         logger.info(f"API     :  - Successfully launched run '{run.run_id}' for job '{job_name}'.")
+                        
+                        # Start background monitoring so logs show progress
+                        logger.info(f"API     :  - Starting background monitor for run '{run.run_id}'...")
+                        threading.Thread(target=_monitor_run_status, args=(run.run_id, job_name), daemon=True).start()
                         
                         # Success! Create a specific result entry for this run
                         success_result = import_result.copy()
@@ -517,13 +598,11 @@ def shutdown():
     # For a simple UI application served by Waitress and launched from a script,
     # a direct exit is the most reliable way to ensure the process terminates
     # when the user closes the application via the UI button.
-    logger.info("--- Server Shutting Down ---")
     os._exit(0)
 
 @app.errorhandler(404)
 def not_found_error(error):
     """Custom 404 error handler to return JSON instead of HTML."""
-    logger.warning(f"404 Not Found: {request.url}")
     return jsonify({"error": "Not Found", "message": f"The requested URL {request.path} was not found on the server."}), 404
 
 
@@ -544,9 +623,6 @@ if __name__ == "__main__":
     init_thread = threading.Thread(target=_initialize_app_thread, daemon=True)
     init_thread.start()
 
-    logger.info("Server  : Starting Data Importer UI on http://localhost:3000")
-    logger.info("Server  : Initialization is running in the background...")
-    
     # The server starts immediately. The launcher script (`.bat` file) is responsible
     # for opening the web browser. The user will first see the status page.
     serve(app, host="0.0.0.0", port=3000)

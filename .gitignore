@@ -1,15 +1,18 @@
-﻿# Virtual Environments
-venv/
-Lib/
-env/
+﻿# Secrets and Environment Variables
 .env
 
 # Python
 __pycache__/
-*.py[cod]
-*.so
+*.pyc
+venv/
+Lib/
+Scripts/
 
-# IDE settings
-.vscode/
-.idea/
+# Project Specific
+backups/
+generated_sql/
 *.log
+
+# OS Specific
+.DS_Store
+Thumbs.db
