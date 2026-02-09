@@ -1,6 +1,8 @@
 import pandas as pd
 import os
 import re
+import csv
+import gc
 from abc import ABC, abstractmethod
 
 class Parser(ABC):
@@ -117,3 +119,39 @@ parser_factory.register_parser("psv", PsvParser)
 parser_factory.register_parser("excel", ExcelParser)
 parser_factory.register_parser("csv_to_excel", CsvToExcelConverterParser)
 # parser_factory.register_parser("json", JsonParser) # Uncomment and register if you add JsonParser
+
+def stream_excel_to_csv(file_path: str, csv_path: str, logger=None) -> None:
+    """
+    Converts an Excel file to CSV using a memory-efficient streaming approach.
+    Uses openpyxl read-only mode for .xlsx to avoid loading the file into RAM.
+    """
+    import time
+    start_time = time.time()
+    
+    # Determine engine based on extension
+    ext = os.path.splitext(file_path)[1].lower()
+    
+    if ext in ['.xlsx', '.xlsm', '.xltx']:
+        if logger: logger.info(f"Streaming Excel conversion (openpyxl) for: {file_path}")
+        import openpyxl
+        # read_only=True and data_only=True ensure we don't load the whole file or formulas into RAM
+        wb = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
+        try:
+            sheet = wb.active
+            with open(csv_path, 'w', newline='', encoding='latin1', errors='replace') as f:
+                writer = csv.writer(f)
+                for row in sheet.values:
+                    if row and any(cell is not None for cell in row):
+                        writer.writerow(row)
+        finally:
+            wb.close()
+            gc.collect()
+    else:
+        if logger: logger.info(f"Standard Excel conversion (pandas) for: {file_path}")
+        # Fallback for legacy .xls files which require loading into memory
+        df = pd.read_excel(file_path)
+        df.to_csv(csv_path, index=False, encoding='latin1', errors='replace')
+        del df
+        gc.collect()
+        
+    if logger: logger.info(f"Excel to CSV conversion completed in {time.time() - start_time:.2f}s")
