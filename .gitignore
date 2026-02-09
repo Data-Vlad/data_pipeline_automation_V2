@@ -1,18 +1,22 @@
-﻿# Secrets and Environment Variables
+# Environment Variables (Secrets)
 .env
 
 # Python
 __pycache__/
 *.pyc
 venv/
-Lib/
-Scripts/
+*.egg-info/
 
-# Project Specific
-backups/
-generated_sql/
+# Logs
 *.log
+launcher-error.log
+simple_ui.log
 
-# OS Specific
-.DS_Store
-Thumbs.db
+# Dagster & Project Data
+dagster_home/
+generated_sql/
+backups/
+
+# IDE settings
+.vscode/
+.idea/
