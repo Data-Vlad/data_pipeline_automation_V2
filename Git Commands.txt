@@ -1,1 +1,21 @@
-Git pull (update the local source code)
+**Option 1: Merge the histories (Recommended)**
+ 
+ If you want to keep your local files and merge them 
+ with the files on GitHub, use the 
+--allow-unrelated-histories flag**
+
+
+git pull https://github.com/Data-Vlad/data_pipeline_automation.git --allow-unrelated-histories
+
+
+
+**Option 2: Force overwrite local with remote**
+
+If you want to discard your local history and make
+your local folder exactly match the GitHub repository, 
+use git reset
+
+git fetch https://github.com/Data-Vlad/data_pipeline_automation.git
+git reset --hard FETCH_HEAD
+
+
