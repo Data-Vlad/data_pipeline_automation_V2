@@ -44,8 +44,12 @@ Use this if you are stuck with merge errors and want to "escape" them and reconn
    git remote add origin https://github.com/Data-Vlad/data_pipeline_automation.git
    git add .
    git commit -m "Emergency reset"
-   git push -f origin main
-
+   git push -u origin main
+   
+   An upstream branch in Git is the specific remote branch that a local 
+   branch is configured to track, allowing for streamlined syncing via git pull or git push without specifying remote names. Setting 
+   an upstream (often using git push -u) 
+   establishes a direct relationship, enabling tracking of changes and easier contribution to shared repositories. 
    (Note: Replace the URL with your actual repository link. The -f flag forces the server to accept your local version).
 
    NOTE: Difference between "Commit" and "Commit & Push"
