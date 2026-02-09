@@ -360,25 +360,52 @@ If it fails, check the run logs for details on data quality issues or parsing er
                         context.log.info(f"Reading Excel file: {file_to_parse} with engine: {excel_engine}")
 
                     try:
-                        with pd.ExcelFile(file_to_parse, engine=excel_engine) as xls:
-                            df_temp = pd.read_excel(xls)
+                        # OPTIMIZATION: Use openpyxl streaming for .xlsx to avoid OOM on large files (like 227MB)
+                        if excel_engine == 'openpyxl':
+                            import openpyxl
+                            import csv
+                            context.log.info("Using openpyxl read-only mode for streaming conversion (Memory Optimized).")
+                            
+                            # read_only=True and data_only=True ensure we don't load the whole file or formulas into RAM
+                            wb = openpyxl.load_workbook(file_to_parse, read_only=True, data_only=True)
+                            try:
+                                sheet = wb.active
+                                with open(csv_path, 'w', newline='', encoding='latin1', errors='replace') as f:
+                                    writer = csv.writer(f)
+                                    for row in sheet.iter_rows(values_only=True):
+                                        # Filter out completely empty rows to keep CSV clean
+                                        if any(cell is not None for cell in row):
+                                            writer.writerow(row)
+                            finally:
+                                wb.close()
+                        else:
+                            # Legacy/XLS handling via Pandas (loads into memory)
+                            with pd.ExcelFile(file_to_parse, engine=excel_engine) as xls:
+                                df_temp = pd.read_excel(xls)
+                            
+                            # Save to CSV (using latin1 to match sql_loader default, errors='replace' to prevent crash)
+                            df_temp.to_csv(csv_path, index=False, encoding='latin1', errors='replace')
+                            
+                            # Cleanup memory
+                            del df_temp
+                            import gc
+                            gc.collect()
+
                     except Exception as e:
-                        context.log.warning(f"Excel read failed with engine {excel_engine}: {e}. Checking if file is actually CSV...")
-                        # Fallback: Try reading as CSV if Excel parse fails (common user error: naming CSV as .xlsx)
+                        context.log.warning(f"Excel conversion failed with engine {excel_engine}: {e}. Checking if file is actually CSV...")
+                        # Fallback: Try reading as CSV if Excel parse fails
                         try:
+                            # Verify it reads as CSV
                             df_temp = pd.read_csv(file_to_parse, encoding='latin1', errors='replace')
+                            # Write standardized CSV
+                            df_temp.to_csv(csv_path, index=False, encoding='latin1', errors='replace')
+                            del df_temp
+                            import gc
+                            gc.collect()
                             context.log.info("Fallback successful: File was actually a CSV.")
                         except Exception as csv_e:
                             # If both fail, raise the original Excel error
                             raise e
-                    
-                    # Save to CSV (using latin1 to match sql_loader default, errors='replace' to prevent crash)
-                    df_temp.to_csv(csv_path, index=False, encoding='latin1', errors='replace')
-                    
-                    # Cleanup memory
-                    del df_temp
-                    import gc
-                    gc.collect()
                     
                     context.log.info(f"Conversion successful. Switching processing mode to CSV using file: {csv_path}")
                     file_to_parse = csv_path
