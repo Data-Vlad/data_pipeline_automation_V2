@@ -21,7 +21,7 @@ def load_df_to_sql(df: pd.DataFrame, table_name: str, engine: Engine):
                     con=connection,
                     if_exists="append",
                     index=False,
-                    chunksize=1000, # Adjust chunksize based on memory and table width
+                    chunksize=10000, # OPTIMIZED: 10k is the sweet spot for fast_executemany
                 )
                 transaction.commit()
             except Exception as e:
