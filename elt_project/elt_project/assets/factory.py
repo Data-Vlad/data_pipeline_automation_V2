@@ -303,6 +303,14 @@ If it fails, check the run logs for details on data quality issues or parsing er
                 # This path handles all standard file types (CSV, Excel, Parquet, PDF, etc.)
                 if source_file_path:
                     file_to_parse = source_file_path
+                    
+                    # NEW: Check for log files passed by sensor to prevent "Unsupported format" errors
+                    if file_to_parse.endswith(".log") or "__run_history" in file_to_parse:
+                        context.log.warning(f"Sensor triggered on a log file ('{os.path.basename(file_to_parse)}'). Skipping processing.")
+                        log_details["status"] = "SKIPPED"
+                        log_details["message"] = "Skipped log file."
+                        return pd.DataFrame()
+
                     if os.path.basename(file_to_parse).startswith("~$"):
                         real_filename = os.path.basename(file_to_parse)[2:]
                         real_file_path = os.path.join(os.path.dirname(file_to_parse), real_filename)
@@ -319,7 +327,10 @@ If it fails, check the run logs for details on data quality issues or parsing er
                     raise ValueError("No source file path provided or configured for extraction.")
 
                 if not os.path.isfile(file_to_parse) and any(ch in str(file_to_parse) for ch in ["*", "?", "["]):
-                    matches = [m for m in glob.glob(file_to_parse, recursive=True) if not os.path.basename(m).startswith("~$")]
+                    matches = [
+                        m for m in glob.glob(file_to_parse, recursive=True) 
+                        if not os.path.basename(m).startswith("~$") and not m.endswith(".log")
+                    ]
                     if not matches:
                         raise FileNotFoundError(f"Source file pattern '{file_to_parse}' did not match any files.")
                     file_to_parse = max(matches, key=os.path.getmtime)
