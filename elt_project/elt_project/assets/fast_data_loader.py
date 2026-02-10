@@ -73,7 +73,7 @@ def load_data_high_performance(file_path: str) -> pd.DataFrame:
         return _load_pdf_tables(file_path)
 
     else:
-        raise ValueError(f"Unsupported file format for high-performance loader: {ext}")
+        raise ValueError(f"Unsupported file format for high-performance loader: '{ext}' (File: {os.path.basename(file_path)}). Supported formats: Excel (.xlsx, .xls), CSV/TXT, Parquet, JSON, PDF.")
 
     row_count = len(df_pl)
     logger.info(f"Loaded {row_count} rows. Converting to Pandas for pipeline compatibility...")
