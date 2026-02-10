@@ -1,6 +1,6 @@
 # Data Pipeline Automation Framework
 
-**This version of the code includes ELT loading process.**
+**This version of the code includes **Ingestion** capabilities, enabling independent execution of data acquisition (Web Scraping, SFTP) separate from the ELT loading process**.
 
 ## Overview
 This project is a robust, metadata-driven ELT (Extract, Load, Transform) framework built on **Dagster** and **SQL Server**. It automates the ingestion of data from various sources (CSV, Excel, Web Scrapers, SFTP) into a centralized data warehouse, ensuring data integrity through strict locking and dependency management mechanisms.
@@ -64,7 +64,6 @@ This separation keeps the Python code focused on technical parsing, while busine
     *   **Custom Python**: Write bespoke Python functions for unique file formats.
 *   **Integrated Data Quality Framework**: Define data quality rules (e.g., `NOT_NULL`, `UNIQUE`, `REGEX_MATCH`) in a SQL table. The framework automatically validates staged data and can halt pipelines on critical failures.
 *   **Automated Data Enrichment for Missing Fields**: Dynamically fill missing or null values in staged data by performing lookups against existing database tables, configured via metadata.
-
 *   **Advanced Load Methods**: Supports both `replace` (full refresh) and `append` (incremental) load patterns, with built-in, automated deduplication for append-based pipelines.
 *   **Robust Logging & Auditing**: Logs detailed run information, row counts, errors, and data quality results to a dedicated SQL table for analytics and auditing.
 *   **Developer Acceleration Utilities**: A suite of one-click utility assets to accelerate development and maintenance.
@@ -439,27 +438,6 @@ This is the most common method. The framework monitors a local directory for new
     *   `file_pattern`: The pattern to match files (e.g., `'daily_sales_*.csv'`).
     *   `file_type`: The type of file to parse (e.g., `'csv'`, `'excel'`, `'psv'`).
 3.  **Enable the Sensor**: In the Dagster UI, go to the **Sensors** tab and turn on the dynamically generated sensor for your pipeline.
-
-#### High-Performance Loading Architecture (2026+ Standard)
-
-The framework utilizes a cutting-edge, Rust-backed loading engine (`fast_data_loader.py`) to handle large datasets (1M+ records) with extreme speed and minimal memory footprint. This replaces legacy streaming methods with memory-mapped binary readers.
-
-1.  **Polars & Arrow Engine**:
-    *   **Technology**: Instead of legacy Python parsers, we use **Polars**, a lightning-fast DataFrame library written in Rust.
-    *   **Benefit**: Polars uses SIMD (Single Instruction, Multiple Data) to process data in parallel, offering 10-50x speed improvements over standard Pandas/CSV parsing.
-    *   **Zero-Copy Conversion**: Data is converted to Pandas using **PyArrow**, ensuring that memory is not duplicated during the hand-off to the transformation layer.
-
-2.  **Rust-Based Excel Parsing**:
-    *   **Engine**: Excel files are read using the **Calamine** engine (via `fastexcel`), which treats Excel files as memory-mapped binary streams.
-    *   **Performance**: This bypasses the slow XML parsing of `openpyxl`, allowing for near-instant reads of massive Excel files without the OOM (Out of Memory) crashes associated with legacy libraries.
-
-3.  **Supported Formats**:
-    *   **Structured**: CSV, PSV, TXT, Parquet, JSON, NDJSON.
-    *   **Excel**: .xlsx, .xls, .xlsb, .xlsm.
-    *   **Unstructured**: PDF (via `pdfplumber` fallback).
-
-4.  **SQL Loading Optimization**:
-    *   **Fast Executemany**: The SQL loader uses `fast_executemany=True` with an optimized chunk size of 10,000 rows. This packs data into binary arrays for the ODBC driver, saturating network bandwidth and maximizing insertion throughput into SQL Server.
 
 ### Method 2: SFTP Server Download
 
@@ -1913,18 +1891,106 @@ You can now use `parser_type: "json"` in your YAML configuration files.
 
 ---
 
+## 7. Modern Analytics & AI Guide
+
+This framework includes a built-in, automated Machine Learning (ML) engine designed to provide actionable insights from your data without requiring deep data science expertise. It runs alongside your ELT pipelines, monitoring data for anomalies and generating future forecasts.
+
+### 7.1. Architecture
+
+The analytics module consists of four integrated components:
+*   **The Brain (`ml_engine.py`)**: A Python module using `scikit-learn` to perform calculations.
+*   **The Memory (SQL Server)**: Stores configuration (`analytics_config`) and results (`analytics_predictions`).
+*   **The Automation (Dagster)**: The `analytics_ai` asset group runs the models automatically.
+*   **The Interface (Streamlit)**: A web-based dashboard for configuration and visualization.
+
+### 7.2. Implementation Steps
+
+#### Step 1: Database Setup
+Ensure you have executed the setup script to create the necessary tables.
+*   Script: `elt_project/sql/06_setup_analytics.sql`
+*   Action: Run this script in your SQL Server database. It creates `analytics_config` and `analytics_predictions`.
+
+#### Step 2: Install Dependencies
+The ML engine requires specific Python libraries. Ensure your environment has them installed:
+```bash
+pip install scikit-learn prophet plotly streamlit
+```
+*(Note: `prophet` is optional but recommended for better forecasting. The system falls back to Linear Regression if it's missing.)*
+
+#### Step 3: Launch the Analytics UI
+To configure rules and view dashboards, run the Streamlit application:
+```bash
+streamlit run analytics_ui.py
+```
+This will open the interface in your browser (default: `http://localhost:8501`).
+
+### 7.3. Configuration Guide
+
+You can configure analytics rules either through the UI or directly via SQL.
+
+#### Method A: Using the Configuration Manager (UI)
+1.  Navigate to the **Configuration Manager** tab in the Analytics UI.
+2.  **Target Table**: Select the database table you wish to analyze (e.g., `dest_daily_sales`).
+3.  **Date Column**: Enter the name of the column containing date/time data (e.g., `sale_date`).
+4.  **Value Column**: Enter the name of the numeric column to analyze (e.g., `total_amount`).
+5.  **Model Type**:
+    *   `anomaly_detection`: Flags unusual data points.
+    *   `forecast`: Predicts future values.
+6.  **Alert Webhook URL** (Optional): Paste a Slack or Microsoft Teams webhook URL. The system will send a POST request to this URL if anomalies are detected.
+7.  Click **Activate Analytics**.
+
+#### Method B: Using SQL
+You can insert configuration rows directly into the database.
+
+```sql
+-- Example: Enable Anomaly Detection with Alerting
+INSERT INTO analytics_config (target_table, date_column, value_column, model_type, alert_webhook_url)
+VALUES ('dest_daily_sales', 'sale_date', 'total_amount', 'anomaly_detection', 'https://hooks.slack.com/services/T000/B000/XXX');
+
+-- Example: Enable Forecasting
+INSERT INTO analytics_config (target_table, date_column, value_column, model_type)
+VALUES ('dest_daily_sales', 'sale_date', 'total_amount', 'forecast');
+```
+
+### 7.4. How It Works (The Execution Loop)
+
+1.  **Trigger**: The `run_predictive_analytics` asset in Dagster executes (either manually or via schedule).
+2.  **Fetch**: It reads active rules from `analytics_config` and queries the specified `target_table` for data.
+3.  **Process**:
+    *   **Anomaly Detection**: Uses the **Isolation Forest** algorithm to identify data points that deviate significantly from the norm.
+    *   **Forecasting**: Uses **Facebook Prophet** (if installed) or **Linear Regression** to generate predictions for the next 30 days.
+4.  **Alert**: If anomalies are found and a webhook is configured, a notification is sent immediately.
+5.  **Store**: Results (anomalies, scores, predicted values) are saved to the `analytics_predictions` table.
+
+### 7.5. Using the Analytics Dashboard
+
+The Streamlit UI provides several views:
+
+*   **Dashboard**: A high-level executive view showing pipeline health metrics (Success/Fail counts) and the total number of AI-detected anomalies.
+*   **Predictive Insights**: A detailed view for specific tables.
+    *   Select a table to see a time-series chart.
+    *   **Red Dots**: Indicate detected anomalies.
+    *   **Dashed Lines**: Indicate future forecasts.
+*   **Auto-Dashboards**: A "Smart" view where the AI analyzes the structure of a table and automatically generates the best visualization (e.g., Correlation Matrix, Bar Chart, Scatter Plot) without manual setup.
+*   **Data Explorer**: A raw data viewer for quick ad-hoc analysis.
+
+### 7.6. Smart Auto-Dashboards Logic
+
+The **Auto-Dashboards** feature uses the ML Engine to automatically determine the best way to visualize any table in your database.
+
+**How it works:**
+1.  **Data Inspection**: When you select a table, the engine samples the data to identify column types (Numeric, Date/Time, Categorical).
+2.  **Pattern Recognition**: It applies heuristic logic to detect patterns:
+    *   **Time Series**: If a Date and Numeric column are found.
+    *   **Correlation**: If 3+ Numeric columns are found.
+    *   **Scatter Plot**: If exactly 2 Numeric columns are found.
+    *   **Bar Chart**: If Categorical and Numeric columns are found.
+    *   **Distribution**: If a single Numeric column is found.
+3.  **Auto-Rendering**: The system dynamically generates the appropriate interactive Plotly chart based on the recommendation.
+
+---
+
 ## Purpose of the `id` Field in `elt_pipeline_configs`
-
-The `id` field in the `elt_pipeline_configs` table serves as the **primary key** for the table, providing several key functions:
-
-1.  **Unique Identification**: As a `PRIMARY KEY`, it guarantees that each row (i.e., each pipeline configuration) has a unique identifier.
-2.  **Auto-Incrementing**: The `IDENTITY(1,1)` property ensures that the database automatically assigns a unique integer value to `id` for each new row inserted, starting from 1 and incrementing by 1. This removes the need for manual ID management.
-3.  **Data Integrity**: It enforces entity integrity, a fundamental principle of relational databases, ensuring that every record is uniquely identifiable.
-4.  **Referential Integrity (Potential)**: While not explicitly used as a foreign key in other tables within this project's current scope, a primary key like `id` is crucial for establishing relationships. For instance, a future `pipeline_run_logs` table could use `config_id` as a foreign key referencing `elt_pipeline_configs.id`.
-5.  **Efficient Data Retrieval**: Database systems leverage primary keys to create indexes, which significantly accelerate data retrieval operations when querying for specific configurations.
-
-In essence, `id` is a standard, best-practice database column that provides a stable, unique, and efficient way to reference and manage individual pipeline configurations within your metadata store.
-
 
 # Dynamic, Metadata-Driven ELT Pipelines
 
