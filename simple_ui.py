@@ -4,6 +4,7 @@ import sys
 import time
 import threading
 import logging
+import tempfile
 from collections import defaultdict
 from typing import List, Optional, Any
 from dotenv import load_dotenv
@@ -25,7 +26,13 @@ if project_root not in sys.path:
 # --- Flask App Initialization ---
 # This must be done BEFORE any other imports that might touch Dagster,
 # and before the Flask app is created.
-dagster_home_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'dagster_home')
+abs_project_root = os.path.dirname(os.path.abspath(__file__))
+# Check for cloud sync folders (Dropbox, OneDrive) that lock SQLite files and cause crashes
+if any(s in abs_project_root for s in ["Dropbox", "OneDrive"]):
+    dagster_home_path = os.path.join(tempfile.gettempdir(), "dpa_dagster_home")
+else:
+    dagster_home_path = os.path.join(abs_project_root, 'dagster_home')
+
 if not os.path.exists(dagster_home_path):
     os.makedirs(dagster_home_path)
 os.environ['DAGSTER_HOME'] = dagster_home_path
@@ -418,7 +425,8 @@ def run_imports():
         if not os.path.exists(workspace_file_path):
             logger.warning(f"API     : workspace.yaml missing at '{workspace_file_path}'. Recreating file.")
             # Use forward slashes for YAML compatibility
-            current_dir = os.path.dirname(dagster_home_path).replace("\\", "/")
+            # FIX: Use the actual project root for code loading, not DAGSTER_HOME (which might be in %TEMP%)
+            current_dir = os.path.dirname(os.path.abspath(__file__)).replace("\\", "/")
             with open(workspace_file_path, "w", encoding="utf-8") as f:
                 f.write("load_from:\n")
                 f.write("  - python_module:\n")
