@@ -945,8 +945,8 @@ This asset moves data from staging to the final, production-ready table.
                 # --- Automated Deduplication for 'append' method ---
                 # Before calling the transform, if this is an append operation with a deduplication key,
                 # we'll clean the staging table to remove rows that already exist in the destination.
-                with engine.connect() as connection: # This was also correct.
-                    with connection.begin() as transaction:
+                with engine.connect() as connection:
+                    with connection.begin():
                         # This logic only applies to 'append' mode with a specified deduplication key.
                         if not should_truncate and config.deduplication_key:
                             context.log.info(f"Performing pre-transform deduplication for '{config.import_name}' on key(s): '{config.deduplication_key}'")
@@ -973,8 +973,6 @@ This asset moves data from staging to the final, production-ready table.
                                 context.log.info(f"Removed {result.rowcount} duplicate rows from '{current_staging_table}' before transformation.")
                             else:
                                 context.log.info(f"No duplicate rows found for '{config.import_name}'.")
-                        
-                        transaction.commit() # This was also correct.
 
                 # The stored procedure is now expected to handle:
                 # 1. Processing only new data identified by the run_id.
@@ -993,16 +991,15 @@ This asset moves data from staging to the final, production-ready table.
 
                 # Generic cleanup: Delete processed data from all staging tables for this run.
                 # This prevents re-processing if the transform asset is re-run, ensuring idempotency.
-                with engine.connect() as connection: # This was also correct.
-                    with connection.begin() as transaction:
-                        from sqlalchemy.sql import quoted_name
+                with engine.connect() as connection:
+                    with connection.begin():
                         context.log.info(f"Cleaning up staging tables for run_id: {context.run_id}")
 
-                        safe_table_name = quoted_name(current_staging_table, quote=True)
-                        delete_stmt = text(f"DELETE FROM {safe_table_name} WHERE dagster_run_id = :run_id")
-                        connection.execute(delete_stmt, {"run_id": context.run_id})
-                        context.log.info(f"Cleaned up staging table: {current_staging_table}")
-                        transaction.commit()
+                        # Use simple string interpolation for table name.
+                        # quoted_name can cause issues if the table name contains schema (e.g. dbo.Table)
+                        delete_stmt = text(f"DELETE FROM {current_staging_table} WHERE dagster_run_id = :run_id")
+                        result = connection.execute(delete_stmt, {"run_id": context.run_id})
+                        context.log.info(f"Cleaned up staging table: {current_staging_table}. Rows deleted: {result.rowcount}")
 
                 log_details["status"] = "SUCCESS"
 
@@ -1012,8 +1009,8 @@ This asset moves data from staging to the final, production-ready table.
                     triggering_import_name, target_import_to_activate = config.import_name, config.on_success_deactivate_self_and_activate_import
                     context.log.info(f"Successfully completed 'replace' for '{triggering_import_name}'. Now attempting to deactivate it and activate '{target_import_to_activate}'.")
 
-                    with engine.connect() as connection: # This was also correct.
-                        with connection.begin() as transaction:
+                    with engine.connect() as connection:
+                        with connection.begin():
                             # Deactivate self
                             deactivate_stmt = text("UPDATE elt_pipeline_configs SET is_active = 0 WHERE import_name = :self_import")
                             connection.execute(deactivate_stmt, {"self_import": triggering_import_name})
@@ -1024,7 +1021,6 @@ This asset moves data from staging to the final, production-ready table.
                             res = connection.execute(activate_stmt, {"target_import": target_import_to_activate})
                             if res.rowcount == 0:
                                 context.log.error(f"CRITICAL: Failed to activate target import '{target_import_to_activate}': Import not found in database. Pipeline chain is broken!")
-                            transaction.commit()
                     context.log.info(f"Successfully updated database. '{triggering_import_name}' is now inactive, and '{target_import_to_activate}' is active. The correct sensor will run on the next tick.")
             except Exception as e:
                 log_details["error_details"] = traceback.format_exc()
@@ -1193,10 +1189,9 @@ def create_column_mapping_utility_asset(config: PipelineConfig):
 
         # --- 4. Update the database ---
         update_stmt = text("UPDATE elt_pipeline_configs SET column_mapping = :mapping WHERE import_name = :import_name")
-        with engine.connect() as connection: # This was also correct.
-            with connection.begin() as transaction:
+        with engine.connect() as connection:
+            with connection.begin():
                 connection.execute(update_stmt, {"mapping": mapping_string, "import_name": config.import_name})
-                transaction.commit()
         
         context.add_output_metadata({"generated_mapping": mapping_string, "updated_import_name": config.import_name})
         context.log.info(f"Successfully updated 'column_mapping' for '{config.import_name}' in the database.")
@@ -1579,10 +1574,9 @@ def create_pipeline_column_mapping_utility_asset(pipeline_name: str, configs: Li
                 mapping_string = ", ".join(mapping_pairs)
 
                 update_stmt = text("UPDATE elt_pipeline_configs SET column_mapping = :mapping WHERE import_name = :import_name")
-                with engine.connect() as connection: # This was also correct.
-                    with connection.begin() as transaction:
+                with engine.connect() as connection:
+                    with connection.begin():
                         connection.execute(update_stmt, {"mapping": mapping_string, "import_name": config.import_name})
-                        transaction.commit()
                 
                 markdown_output.append(f"### Import: `{config.import_name}`")
                 markdown_output.append("```")
