@@ -395,6 +395,18 @@ def run_imports():
             logger.warning(f"API     : DAGSTER_HOME '{dagster_home_path}' missing. Recreating directory.")
             os.makedirs(dagster_home_path, exist_ok=True)
 
+        # Ensure workspace.yaml exists to prevent FileNotFoundError
+        if not os.path.exists(workspace_file_path):
+            logger.warning(f"API     : workspace.yaml missing at '{workspace_file_path}'. Recreating file.")
+            # Use forward slashes for YAML compatibility
+            current_dir = os.path.dirname(dagster_home_path).replace("\\", "/")
+            with open(workspace_file_path, "w", encoding="utf-8") as f:
+                f.write("load_from:\n")
+                f.write("  - python_module:\n")
+                f.write("      module_name: \"elt_project.elt_project.definitions\"\n")
+                f.write("      location_name: \"elt_project\"\n")
+                f.write(f"      working_directory: \"{current_dir}\"\n")
+
         instance = DagsterInstance.get()
         with WorkspaceProcessContext(
             # Use DagsterInstance.get() which respects the DAGSTER_HOME environment variable.
