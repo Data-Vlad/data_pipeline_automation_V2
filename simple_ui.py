@@ -25,7 +25,7 @@ if project_root not in sys.path:
 # --- Flask App Initialization ---
 # This must be done BEFORE any other imports that might touch Dagster,
 # and before the Flask app is created.
-dagster_home_path = os.path.join(os.path.dirname(__file__), 'dagster_home')
+dagster_home_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'dagster_home')
 if not os.path.exists(dagster_home_path):
     os.makedirs(dagster_home_path)
 os.environ['DAGSTER_HOME'] = dagster_home_path
@@ -389,6 +389,12 @@ def run_imports():
 
         logger.info("API     : Loading Dagster workspace context...")
         workspace_file_path = os.path.join(dagster_home_path, "workspace.yaml")
+        
+        # Ensure DAGSTER_HOME exists to prevent DagsterInvariantViolationError
+        if not os.path.exists(dagster_home_path):
+            logger.warning(f"API     : DAGSTER_HOME '{dagster_home_path}' missing. Recreating directory.")
+            os.makedirs(dagster_home_path, exist_ok=True)
+
         instance = DagsterInstance.get()
         with WorkspaceProcessContext(
             # Use DagsterInstance.get() which respects the DAGSTER_HOME environment variable.
