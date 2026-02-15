@@ -29,19 +29,14 @@ def load_df_to_sql(df: pd.DataFrame, table_name: str, engine: Engine):
     # For smaller datasets (<50k), use a single transaction for simplicity and atomicity
     if total_rows < 50000:
         with engine.connect() as connection:
-            with connection.begin() as transaction:
-                try:
-                    df.to_sql(
-                        name=table_name,
-                        con=connection,
-                        if_exists="append",
-                        index=False,
-                        chunksize=chunksize, 
-                    )
-                    transaction.commit()
-                except Exception as e:
-                    transaction.rollback()
-                    raise e
+            with connection.begin():
+                df.to_sql(
+                    name=table_name,
+                    con=connection,
+                    if_exists="append",
+                    index=False,
+                    chunksize=chunksize, 
+                )
     else:
         # For large datasets, use parallel uploads to saturate I/O
         chunks = [df[i:i + chunksize] for i in range(0, total_rows, chunksize)]
@@ -163,26 +158,21 @@ def execute_stored_procedure(
     Optionally passes a run_id and a list of tables to truncate to the stored procedure.
     """
     with engine.connect() as connection:
-        with connection.begin() as transaction:
-            try:
-                # Build the execution text and parameters
-                # The procedure name must be part of the string and not a parameter.
-                # Since it comes from a trusted config, this is safe.
-                exec_text = f"EXEC {procedure_name}"
-                params = {}
-                
-                # Append parameters, ensuring commas are used to separate them if needed.
-                param_parts = []
-                if run_id:
-                    param_parts.append("@run_id = :run_id")
-                    params["run_id"] = run_id
-                if tables_to_truncate:
-                    param_parts.append("@tables_to_truncate = :tables_to_truncate")
-                    params["tables_to_truncate"] = tables_to_truncate
-                if param_parts:
-                    exec_text += " " + ", ".join(param_parts)
-                connection.execute(text(exec_text), params)
-                transaction.commit()
-            except Exception as e:
-                transaction.rollback()
-                raise e
+        with connection.begin():
+            # Build the execution text and parameters
+            # The procedure name must be part of the string and not a parameter.
+            # Since it comes from a trusted config, this is safe.
+            exec_text = f"EXEC {procedure_name}"
+            params = {}
+            
+            # Append parameters, ensuring commas are used to separate them if needed.
+            param_parts = []
+            if run_id:
+                param_parts.append("@run_id = :run_id")
+                params["run_id"] = run_id
+            if tables_to_truncate:
+                param_parts.append("@tables_to_truncate = :tables_to_truncate")
+                params["tables_to_truncate"] = tables_to_truncate
+            if param_parts:
+                exec_text += " " + ", ".join(param_parts)
+            connection.execute(text(exec_text), params)
