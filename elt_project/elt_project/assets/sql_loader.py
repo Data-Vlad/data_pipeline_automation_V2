@@ -12,6 +12,17 @@ def load_df_to_sql(df: pd.DataFrame, table_name: str, engine: Engine):
     Loads a DataFrame into a SQL table by appending, using parallel execution for speed.
     Truncation for 'replace' load method is now handled in the asset factory.
     """
+    # Filter and normalize columns to match DB schema
+    # This prevents errors when the source has duplicate columns (e.g. Position, Position_1)
+    inspector = inspect(engine)
+    db_cols = {col['name'].lower(): col['name'] for col in inspector.get_columns(table_name)}
+    
+    valid_cols = [c for c in df.columns if c.lower() in db_cols]
+    if valid_cols:
+        df = df[valid_cols]
+        rename_map = {c: db_cols[c.lower()] for c in valid_cols}
+        df = df.rename(columns=rename_map)
+
     total_rows = len(df)
     chunksize = 25000 # OPTIMIZED: 25k-50k is the sweet spot for fast_executemany in 2026+
 
