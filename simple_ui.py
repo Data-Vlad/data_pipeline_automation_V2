@@ -76,6 +76,7 @@ cli_args = parser.parse_args()
 class AppState:
     def __init__(self):
         self.db_engine = None
+        self.dagster_instance = None
         self.initialization_status = "PENDING"  # PENDING, SUCCESS, or FAILED
         self.initialization_error = None
         self.lock = threading.Lock()
@@ -113,6 +114,10 @@ def _initialize_app_thread():
             raise FileNotFoundError(
                 f"Dagster workspace file not found at '{workspace_file_path}'. "
             )
+
+        # --- Step 4: Initialize Dagster Instance ---
+        # Prime the instance to ensure DB schemas are created serially.
+        _get_dagster_instance()
 
         # --- Success! Mark app as ready. ---
         with APP_STATE.lock:
@@ -185,6 +190,17 @@ def _get_db_engine():
             # A 10-second timeout is a reasonable default.
             APP_STATE.db_engine = create_engine(conn_string, pool_pre_ping=True, connect_args={"timeout": 10})
     return APP_STATE.db_engine
+
+
+def _get_dagster_instance():
+    """
+    Thread-safe singleton accessor for DagsterInstance.
+    Prevents race conditions on SQLite initialization (table already exists errors).
+    """
+    with APP_STATE.lock:
+        if APP_STATE.dagster_instance is None:
+            APP_STATE.dagster_instance = DagsterInstance.get()
+    return APP_STATE.dagster_instance
 
 
 def _recreate_db_engine():
@@ -325,8 +341,8 @@ def _monitor_run_status(run_id, job_name):
     This gives the user visibility into the execution phase.
     """
     try:
-        # Create a fresh instance for this thread
-        instance = DagsterInstance.get()
+        # Use cached instance to prevent SQLite locking/race conditions
+        instance = _get_dagster_instance()
         last_status = None
         logs_seen_count = 0
         
@@ -394,6 +410,9 @@ def run_imports():
         if not os.path.exists(dagster_home_path):
             logger.warning(f"API     : DAGSTER_HOME '{dagster_home_path}' missing. Recreating directory.")
             os.makedirs(dagster_home_path, exist_ok=True)
+            # Invalidate cached instance since the home directory was recreated
+            with APP_STATE.lock:
+                APP_STATE.dagster_instance = None
 
         # Ensure workspace.yaml exists to prevent FileNotFoundError
         if not os.path.exists(workspace_file_path):
@@ -407,7 +426,7 @@ def run_imports():
                 f.write("      location_name: \"elt_project\"\n")
                 f.write(f"      working_directory: \"{current_dir}\"\n")
 
-        instance = DagsterInstance.get()
+        instance = _get_dagster_instance()
         with WorkspaceProcessContext(
             # Use DagsterInstance.get() which respects the DAGSTER_HOME environment variable.
             # This creates a non-ephemeral instance that can be used for cross-process
@@ -594,7 +613,7 @@ def get_run_status(run_id):
     API endpoint to check the status of a specific Dagster run.
     """
     try:
-        instance = DagsterInstance.get()
+        instance = _get_dagster_instance()
         run = instance.get_run_by_id(run_id)
         
         if not run:
