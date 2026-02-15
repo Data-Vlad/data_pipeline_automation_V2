@@ -27,11 +27,9 @@ if project_root not in sys.path:
 # This must be done BEFORE any other imports that might touch Dagster,
 # and before the Flask app is created.
 abs_project_root = os.path.dirname(os.path.abspath(__file__))
-# Check for cloud sync folders (Dropbox, OneDrive) that lock SQLite files and cause crashes
-if any(s in abs_project_root for s in ["Dropbox", "OneDrive"]):
-    dagster_home_path = os.path.join(tempfile.gettempdir(), "dpa_dagster_home")
-else:
-    dagster_home_path = os.path.join(abs_project_root, 'dagster_home')
+# Always use a temporary directory for DAGSTER_HOME.
+# This prevents file locking issues with Dropbox/OneDrive and keeps the project root clean for GitHub syncing.
+dagster_home_path = os.path.join(tempfile.gettempdir(), "dpa_dagster_home")
 
 if not os.path.exists(dagster_home_path):
     os.makedirs(dagster_home_path)

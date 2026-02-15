@@ -19,11 +19,13 @@ set "UI_SCRIPT=%SCRIPT_DIR%simple_ui.py"
 set "GET_CREDS_SCRIPT=%SCRIPT_DIR%get_credentials.py"
 set "CREATE_DIRS_SCRIPT=%SCRIPT_DIR%create_dirs.py"
 set "ERROR_LOG=%SCRIPT_DIR%launcher-error.log"
-set "DAGSTER_HOME_DIR=%SCRIPT_DIR%dagster_home"
+set "DAGSTER_HOME_DIR=%TEMP%\dpa_dagster_home"
 
 :: Clean up old log files
 if exist "%ERROR_LOG%" del "%ERROR_LOG%"
 if exist "simple_ui.log" del "simple_ui.log"
+:: Clean up legacy dagster_home from project root to keep git clean
+if exist "%SCRIPT_DIR%dagster_home" rd /s /q "%SCRIPT_DIR%dagster_home"
 
 
 :: ============================================================================
